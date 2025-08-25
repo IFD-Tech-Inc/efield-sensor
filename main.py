@@ -5,6 +5,16 @@ from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 import textwrap
 import math
+import os
+import argparse
+from pathlib import Path
+
+# Import Siglent binary parser (if available)
+try:
+    from siglent_parser import SiglentBinaryParser
+    SIGLENT_PARSER_AVAILABLE = True
+except ImportError:
+    SIGLENT_PARSER_AVAILABLE = False
 
 # --- Configuration ---
 CSV_FILE = r"C:\Users\DavidLin\Desktop\E-field Data\Data\123.csv"
@@ -13,6 +23,7 @@ AMPLIFICATION_CH3 = 20  # Amplify channel 3 (E-field) x10, adjust as needed
 DOWNSAMPLE_FACTOR = 10  # Downsample factor to speed processing; set to 1 to disable
 FILTER_ORDER = 4
 FILTER_CUTOFF_HZ = None  # None = auto cutoff at fs/10, or specify as needed
+BINARY_DATA_DIR = "data"  # Directory containing Siglent binary data files
 
 # --- Helper functions ---
 
@@ -203,17 +214,66 @@ def plot_signals(time, raw_signals, filtered_signals, fitted_params, downsample_
     plt.tight_layout(rect=[0, 0, 0.9, 1])
     plt.show()
 
+def read_siglent_binary_data(directory=BINARY_DATA_DIR):
+    """
+    Read Siglent oscilloscope binary data files.
+    
+    Args:
+        directory: Directory containing binary data files
+        
+    Returns:
+        Tuple of (time_array, [ch1_data, ch2_data, ch3_data])
+    """
+    if not SIGLENT_PARSER_AVAILABLE:
+        raise ImportError("siglent_parser module not available. Run the parser separately first.")
+        
+    parser = SiglentBinaryParser()
+    channels = parser.parse_directory(directory)
+    
+    # Verify we have the channels we need
+    needed_channels = ['C1', 'C3']
+    missing = [ch for ch in needed_channels if ch not in channels]
+    if missing:
+        raise ValueError(f"Missing required channels: {', '.join(missing)}")
+        
+    # Get time array from C1 (should be the same for all channels)
+    time_array = channels['C1'].get_time_array()
+    
+    # Get channel data - align with expected order: C1, C2, C3
+    ch_data = []
+    for ch_name in ['C1', 'C2', 'C3']:
+        if ch_name in channels:
+            ch_data.append(channels[ch_name].voltage_data)
+        else:
+            # If channel missing (e.g., C2), insert zeros
+            ch_data.append(np.zeros_like(time_array))
+    
+    return time_array, ch_data
+
 # --- Main processing ---
 
 def main():
-    # 1. Read data from CSV
-    data = read_oscilloscope_csv(CSV_FILE)
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="E-field sensor data analysis")
+    parser.add_argument("--binary", action="store_true", help="Use Siglent binary data instead of CSV")
+    parser.add_argument("--csv", type=str, help="CSV file path", default=CSV_FILE)
+    parser.add_argument("--binary-dir", type=str, help="Directory with binary files", default=BINARY_DATA_DIR)
+    args = parser.parse_args()
 
-    # Extract time and signals as floats from columns; note channel columns may need adjusting
-    time = data['Second'].astype(float).values
-    ch1 = data['Volt'].astype(float).values   # Channel 1 voltage
-    ch2 = data.iloc[:, 2].astype(float).values  # Channel 2 voltage (E-field)
-    ch3 = data.iloc[:, 3].astype(float).values  # Channel 3 voltage (E-field)
+    # 1. Read data - either from CSV or binary files
+    if args.binary and SIGLENT_PARSER_AVAILABLE:
+        print(f"Reading Siglent binary data from {args.binary_dir}...")
+        time, [ch1, ch2, ch3] = read_siglent_binary_data(args.binary_dir)
+    else:
+        if args.binary and not SIGLENT_PARSER_AVAILABLE:
+            print("Warning: Siglent binary parser not available. Falling back to CSV.")
+        print(f"Reading CSV data from {args.csv}...")
+        data = read_oscilloscope_csv(args.csv)
+        # Extract time and signals as floats from columns
+        time = data['Second'].astype(float).values
+        ch1 = data['Volt'].astype(float).values   # Channel 1 voltage
+        ch2 = data.iloc[:, 2].astype(float).values  # Channel 2 voltage (E-field)
+        ch3 = data.iloc[:, 3].astype(float).values  # Channel 3 voltage (E-field)
 
     # 2. Amplify E-field signals (channels 2 and 3)
     ch2_amp = amplify_signal(ch2, AMPLIFICATION_CH2)
