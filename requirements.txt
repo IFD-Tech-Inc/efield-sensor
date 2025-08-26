@@ -1,5 +1,5 @@
-# Requirements for efield sensor 2ph v5.py
-# E-field sensor data analysis script dependencies
+# Requirements for Siglent Waveform Viewer
+# PyQt6-based GUI application for oscilloscope data analysis
 
 # Core scientific computing
 numpy>=1.21.0
@@ -8,7 +8,12 @@ pandas>=1.3.0
 # Signal processing and optimization
 scipy>=1.7.0
 
-# Data visualization
+# GUI Framework
+PyQt6>=6.4.0
+PyQt6-Qt6>=6.4.0
+PyQt6-sip>=13.4.0
+
+# Data visualization with Qt backend
 matplotlib>=3.4.0
 
 # Optional: For better performance with large datasets
