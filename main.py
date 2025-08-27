@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Siglent Waveform Viewer - PyQt6 Application
+IFD Signal Analysis Utility - PyQt6 Application
 
 A comprehensive GUI application for visualizing and analyzing oscilloscope waveform data
 from Siglent Binary Format V4.0 files. Features include:
@@ -14,6 +14,8 @@ from Siglent Binary Format V4.0 files. Features include:
 Author: Assistant
 Version: 1.0.0
 Dependencies: PyQt6, matplotlib, numpy, scipy
+
+For internal development use only.
 """
 
 import sys
@@ -52,6 +54,14 @@ except ImportError as e:
     SIGLENT_PARSER_AVAILABLE = False
     print(f"Warning: Siglent parser not available: {e}")
 
+# Import progress dialog
+try:
+    from progressdialog import LoadingProgressDialog
+    PROGRESS_DIALOG_AVAILABLE = True
+except ImportError as e:
+    PROGRESS_DIALOG_AVAILABLE = False
+    print(f"Warning: Progress dialog not available: {e}")
+
 
 class LoadWaveformThread(QThread):
     """
@@ -59,6 +69,7 @@ class LoadWaveformThread(QThread):
     Emits signals with progress updates and results.
     """
     progress = pyqtSignal(str)  # Status message
+    progress_percentage = pyqtSignal(int, str)  # Progress percentage and message
     finished = pyqtSignal(dict)  # Channel data dictionary
     error = pyqtSignal(str)  # Error message
     
@@ -74,16 +85,38 @@ class LoadWaveformThread(QThread):
                 self.error.emit("Siglent parser module not available")
                 return
                 
+            # Stage 1: Initialize parser (10%)
+            self.progress_percentage.emit(10, "Initializing parser...")
+            self.progress.emit("Initializing parser...")
             parser = SiglentBinaryParser()
             
             if self.is_directory:
+                # Stage 2: Scanning directory (25%)
+                self.progress_percentage.emit(25, f"Scanning directory: {Path(self.file_path).name}")
                 self.progress.emit(f"Scanning directory: {self.file_path}")
+                
+                # Stage 3: Parsing files (50%)
+                self.progress_percentage.emit(50, "Parsing waveform files...")
                 channels = parser.parse_directory(self.file_path)
+                
+                # Stage 4: Processing data (75%)
+                self.progress_percentage.emit(75, f"Processing {len(channels)} channels...")
                 self.progress.emit(f"Loaded {len(channels)} channels from directory")
             else:
+                # Stage 2: Reading file (25%)
+                self.progress_percentage.emit(25, f"Reading file: {Path(self.file_path).name}")
                 self.progress.emit(f"Loading file: {Path(self.file_path).name}")
+                
+                # Stage 3: Parsing data (50%)
+                self.progress_percentage.emit(50, "Parsing waveform data...")
                 channels = parser.parse_file(self.file_path)
+                
+                # Stage 4: Processing channels (75%)
+                self.progress_percentage.emit(75, f"Processing {len(channels)} channels...")
                 self.progress.emit(f"Loaded {len(channels)} channels from file")
+            
+            # Stage 5: Finalizing (90%)
+            self.progress_percentage.emit(90, "Finalizing data processing...")
             
             # Add metadata to channels
             result = {
@@ -93,6 +126,8 @@ class LoadWaveformThread(QThread):
                 'is_directory': self.is_directory
             }
             
+            # Complete (100%)
+            self.progress_percentage.emit(100, "Loading completed successfully")
             self.finished.emit(result)
             
         except Exception as e:
@@ -122,7 +157,7 @@ class PlotCanvas(FigureCanvas):
         self.ax.set_xlabel('Time (s)')
         self.ax.set_ylabel('Voltage (V)')
         self.ax.grid(True, alpha=0.3)
-        self.ax.set_title('Waveform Viewer - Load data to begin')
+        self.ax.set_title('IFD Signal Analysis - Load data to begin')
         
         # Store plot data for management
         self.plot_data = {}  # Store channel name -> plot line mapping
@@ -136,7 +171,7 @@ class PlotCanvas(FigureCanvas):
         self.ax.set_xlabel('Time (s)')
         self.ax.set_ylabel('Voltage (V)')
         self.ax.grid(True, alpha=0.3)
-        self.ax.set_title('Waveform Viewer - Load data to begin')
+        self.ax.set_title('IFD Signal Analysis - Load data to begin')
         self.plot_data.clear()
         self.channel_visibility.clear()
         self.color_index = 0
@@ -214,7 +249,7 @@ class PlotCanvas(FigureCanvas):
         
         # Update title with channel info
         num_visible = sum(self.channel_visibility.values())
-        self.ax.set_title(f'Waveform Viewer - {num_visible} channel(s) displayed')
+        self.ax.set_title(f'IFD Signal Analysis - {num_visible} channel(s) displayed')
         
         self.draw()
         
@@ -226,7 +261,7 @@ class PlotCanvas(FigureCanvas):
             
             # Update title
             num_visible = sum(self.channel_visibility.values())
-            self.ax.set_title(f'Waveform Viewer - {num_visible} channel(s) displayed')
+            self.ax.set_title(f'IFD Signal Analysis - {num_visible} channel(s) displayed')
             
             # Update legend to only show visible channels
             handles = []
@@ -274,7 +309,7 @@ class PlotCanvas(FigureCanvas):
                 
             # Update title
             num_visible = sum(self.channel_visibility.values())
-            self.ax.set_title(f'Waveform Viewer - {num_visible} channel(s) displayed')
+            self.ax.set_title(f'IFD Signal Analysis - {num_visible} channel(s) displayed')
             
             self.draw()
 
@@ -367,9 +402,9 @@ class ChannelListWidget(QListWidget):
                 break
 
 
-class WaveformViewerMainWindow(QMainWindow):
+class IFDSignalAnalysisMainWindow(QMainWindow):
     """
-    Main application window for the Siglent Waveform Viewer.
+    Main application window for the IFD Signal Analysis Utility.
     
     Provides a comprehensive interface for loading, visualizing, and managing
     oscilloscope waveform data with support for multiple channels and files.
@@ -381,10 +416,11 @@ class WaveformViewerMainWindow(QMainWindow):
         # Application state
         self.loaded_data = {}  # Store all loaded channel data
         self.parsers = {}  # Store parser instances for each loaded file
-        self.settings = QSettings('SiglentWaveformViewer', 'Settings')
+        self.settings = QSettings('IFDSignalAnalysisUtility', 'Settings')
+        self.progress_dialog = None  # Will hold progress dialog during loading
         
         # UI setup
-        self.setWindowTitle('Siglent Waveform Viewer v1.0')
+        self.setWindowTitle('IFD Signal Analysis Utility v1.0')
         self.setGeometry(100, 100, 1400, 900)
         
         # Initialize the UI components
@@ -398,7 +434,7 @@ class WaveformViewerMainWindow(QMainWindow):
         self.load_settings()
         
         # Show welcome message
-        self.status_bar.showMessage('Ready - Load waveform data to begin analysis', 5000)
+        self.status_bar.showMessage('IFD Signal Analysis Utility - Ready to load waveform data', 5000)
         
     def create_menu_bar(self):
         """Create the application menu bar with File, View, and Help menus."""
@@ -670,23 +706,56 @@ class WaveformViewerMainWindow(QMainWindow):
             self.load_waveform_data(directory, is_directory=True)
             
     def load_waveform_data(self, path: str, is_directory: bool):
-        """Load waveform data in a background thread."""
+        """Load waveform data in a background thread with progress dialog."""
         self.status_bar.showMessage('Loading waveform data...', 0)
+        
+        # Create progress dialog if available
+        if PROGRESS_DIALOG_AVAILABLE:
+            self.progress_dialog = LoadingProgressDialog(self)
+            operation_desc = "Loading directory" if is_directory else "Loading file"
+            self.progress_dialog.start_loading(operation_desc)
         
         # Create and start the loading thread
         self.load_thread = LoadWaveformThread(path, is_directory)
         self.load_thread.progress.connect(self.on_load_progress)
+        self.load_thread.progress_percentage.connect(self.on_load_progress_percentage)
         self.load_thread.finished.connect(self.on_load_finished)
         self.load_thread.error.connect(self.on_load_error)
+        
+        # Connect progress dialog cancellation if available
+        if self.progress_dialog:
+            self.progress_dialog.cancelled.connect(self.on_load_cancelled)
+            
         self.load_thread.start()
         
     def on_load_progress(self, message: str):
         """Handle progress updates from the loading thread."""
         self.status_bar.showMessage(message, 0)
         
+    def on_load_progress_percentage(self, percentage: int, message: str):
+        """Handle progress percentage updates from the loading thread."""
+        if self.progress_dialog and not self.progress_dialog.is_cancelled():
+            if not self.progress_dialog.update_progress(percentage, message):
+                # User cancelled, terminate the thread
+                if hasattr(self, 'load_thread') and self.load_thread.isRunning():
+                    self.load_thread.terminate()
+                    self.load_thread.wait()
+                    
+    def on_load_cancelled(self):
+        """Handle cancellation of the loading operation."""
+        if hasattr(self, 'load_thread') and self.load_thread.isRunning():
+            self.load_thread.terminate()
+            self.load_thread.wait()
+        self.status_bar.showMessage('Loading cancelled by user', 3000)
+        
     def on_load_finished(self, result: dict):
         """Handle successful completion of waveform data loading."""
         try:
+            # Close progress dialog if it exists
+            if self.progress_dialog:
+                self.progress_dialog.finish_loading("Loading completed successfully")
+                self.progress_dialog = None
+                
             channels = result['channels']
             parser = result['parser']
             source_path = result['source_path']
@@ -731,6 +800,11 @@ class WaveformViewerMainWindow(QMainWindow):
             
     def on_load_error(self, error_message: str):
         """Handle errors during waveform data loading."""
+        # Close progress dialog if it exists
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+            
         QMessageBox.critical(self, 'Load Error', f'Failed to load waveform data:\n\n{error_message}')
         self.status_bar.showMessage('Ready', 5000)
         
@@ -823,9 +897,10 @@ class WaveformViewerMainWindow(QMainWindow):
     def show_about_dialog(self):
         """Display the About dialog."""
         about_text = """
-        <h2>Siglent Waveform Viewer</h2>
+        <h2>IFD Signal Analysis Utility</h2>
         <p><b>Version:</b> 1.0.0</p>
         <p><b>Author:</b> Assistant</p>
+        <p><b>For internal development use only.</b></p>
         
         <p>A comprehensive PyQt6 application for visualizing and analyzing 
         oscilloscope waveform data from Siglent Binary Format V4.0 files.</p>
@@ -843,7 +918,7 @@ class WaveformViewerMainWindow(QMainWindow):
         <p><b>Dependencies:</b> PyQt6, matplotlib, numpy, scipy</p>
         """
         
-        QMessageBox.about(self, 'About Siglent Waveform Viewer', about_text)
+        QMessageBox.about(self, 'About IFD Signal Analysis Utility', about_text)
         
     def closeEvent(self, event):
         """Handle application closing."""
@@ -852,28 +927,59 @@ class WaveformViewerMainWindow(QMainWindow):
 
 
 def main():
-    """Main application entry point."""
+    """Main application entry point with splash screen."""
     # Create QApplication instance
     app = QApplication(sys.argv)
     
     # Set application properties
-    app.setApplicationName('Siglent Waveform Viewer')
+    app.setApplicationName('IFD Signal Analysis Utility')
     app.setApplicationVersion('1.0.0')
-    app.setOrganizationName('SiglentWaveformViewer')
-    app.setOrganizationDomain('github.com')
+    app.setOrganizationName('IFDSignalAnalysisUtility')
+    app.setOrganizationDomain('ifd.internal')
     
     # Set application style and theme
     app.setStyle('Fusion')  # Modern cross-platform style
     
+    # Create and show splash screen
+    splash = None
     try:
-        # Create and show main window
-        window = WaveformViewerMainWindow()
+        from splashscreen import IFDSplashScreen
+        splash = IFDSplashScreen()
+        splash.show()
+        splash.show_message("Loading application...")
+        app.processEvents()
+        
+        # Allow splash to be visible for a moment
+        QTimer.singleShot(1500, lambda: None)
+        for i in range(15):  # Brief delay to show splash
+            app.processEvents()
+            QTimer.singleShot(100, lambda: None)
+            
+    except ImportError:
+        print("Warning: Splash screen not available")
+    
+    try:
+        # Create main window
+        if splash:
+            splash.show_message("Initializing main window...")
+            app.processEvents()
+            
+        window = IFDSignalAnalysisMainWindow()
+        
+        # Close splash and show main window
+        if splash:
+            splash.finish_loading(window)
+        
         window.show()
         
         # Run the event loop
         sys.exit(app.exec())
         
     except Exception as e:
+        # Close splash if there's an error
+        if splash:
+            splash.close()
+            
         # Handle any uncaught exceptions
         QMessageBox.critical(
             None, 
