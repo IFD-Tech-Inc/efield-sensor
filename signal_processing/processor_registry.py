@@ -4,6 +4,21 @@ Signal Processor Registry for IFD Signal Analysis Utility.
 
 This module provides dynamic loading and management of signal processing modules.
 It automatically discovers and registers processor classes from the signal_processing directory.
+
+PROCESSOR FILTERING:
+The registry automatically excludes template and example processors from the production UI.
+These processors (defined in template_processor.py) are intended for developer reference
+and should not appear in the user interface. The filtering is based on class names and
+display names defined in the EXCLUDED_PROCESSOR_CLASSES and EXCLUDED_PROCESSOR_NAMES
+constants at the top of this file.
+
+Template processors remain accessible to developers for:
+- Reference when creating new processors
+- Copy/paste starting points for new implementations  
+- Learning implementation patterns and best practices
+
+To add new exclusions, simply add the class name and display name to the respective
+sets defined at the module level.
 """
 
 import os
@@ -15,6 +30,35 @@ from typing import Dict, List, Type, Optional, Any
 from pathlib import Path
 
 from .base_processor import SignalProcessor, ProcessingError
+
+# Configuration: Processors to exclude from production UI
+# 
+# These are template and example processors intended for developer reference only.
+# They provide code templates and implementation examples for creating new processors
+# but should not appear in the production user interface.
+#
+# ADDING NEW EXCLUSIONS:
+# To exclude additional template or example processors, add them to both sets below:
+# 1. Add the class name to EXCLUDED_PROCESSOR_CLASSES
+# 2. Add the display name (from get_name() method) to EXCLUDED_PROCESSOR_NAMES
+#
+# TEMPLATE FILE ACCESS:
+# The template_processor.py file remains accessible to developers who can:
+# - Use it as reference for creating new processors
+# - Copy and modify the template classes for new implementations
+# - Study the implementation patterns and best practices
+#
+EXCLUDED_PROCESSOR_CLASSES = {
+    'TemplateProcessor',                    # Main template processor
+    'ExampleFrequencyDomainProcessor',      # FFT processing example  
+    'ExampleParameterValidationProcessor'   # Parameter validation example
+}
+
+EXCLUDED_PROCESSOR_NAMES = {
+    'Template Processor',       # Display name for TemplateProcessor
+    'Example FFT Processor',    # Display name for ExampleFrequencyDomainProcessor
+    'Example Validation Processor'  # Display name for ExampleParameterValidationProcessor
+}
 
 
 class ProcessorRegistry:
@@ -106,9 +150,21 @@ class ProcessorRegistry:
             file_path: Path to the module file
         """
         try:
+            # Skip processors that are excluded from production UI
+            # These are templates and examples intended for developer reference
+            class_name = processor_class.__name__
+            if class_name in EXCLUDED_PROCESSOR_CLASSES:
+                print(f"Skipping template/example processor: {class_name}")
+                return
+            
             # Create temporary instance to get metadata
             temp_instance = processor_class()
             processor_name = temp_instance.get_name()
+            
+            # Double-check exclusion by display name (in case class name doesn't match)
+            if processor_name in EXCLUDED_PROCESSOR_NAMES:
+                print(f"Skipping template/example processor: {processor_name}")
+                return
             
             # Validate the processor implementation
             self._validate_processor_class(processor_class)
