@@ -7,7 +7,7 @@ with PyQt6 for waveform visualization and interactive plotting.
 """
 
 import matplotlib
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Tuple
 import numpy as np
 
 # Set matplotlib backend before other matplotlib imports
@@ -31,6 +31,14 @@ from ..utils.constants import (
     PLOT_GRID_ALPHA,
     PLOT_LEGEND_LOCATION,
     AVAILABLE_PLOT_COLORS
+)
+from ..utils.scaling_utils import (
+    calculate_engineering_range,
+    get_engineering_tick_values,
+    should_use_separate_axes,
+    group_channels_by_scale,
+    calculate_axis_positions,
+    format_engineering_value
 )
 
 # Import will be handled at runtime to avoid circular dependencies
@@ -88,6 +96,12 @@ class PlotCanvas(FigureCanvas):
         self.plot_data: Dict[str, Dict[str, Any]] = {}  # Channel name -> plot line mapping
         self.channel_visibility: Dict[str, bool] = {}  # Channel visibility state
         
+        # Multiple y-axes support
+        self.axes_dict: Dict[int, Any] = {0: self.ax}  # Axis index -> matplotlib axes object
+        self.channel_to_axis: Dict[str, int] = {}  # Channel name -> axis index mapping
+        self.axis_colors: Dict[int, str] = {}  # Axis index -> representative color
+        self.axis_ranges: Dict[int, Tuple[float, float]] = {}  # Axis index -> (min, max) range
+        
         # Channel selection and scaling
         self.selected_channel: Optional[str] = None
         self.channel_scale_factors: Dict[str, float] = {}  # Channel name -> scale factor
@@ -118,14 +132,29 @@ class PlotCanvas(FigureCanvas):
         
     def clear_all_plots(self) -> None:
         """Clear all plotted data and reset the canvas."""
+        # Clear all axes except the main one
+        for axis_idx, axis_obj in list(self.axes_dict.items()):
+            if axis_idx != 0:  # Don't remove main axis
+                axis_obj.remove()
+        
+        # Reset main axis
         self.ax.clear()
         self._setup_empty_plot()
+        
+        # Reset all state variables
         self.plot_data.clear()
         self.channel_visibility.clear()
         self.selected_channel = None
         self.channel_scale_factors.clear()
         self.original_data.clear()
         self.color_index = 0
+        
+        # Reset multiple axes state
+        self.axes_dict = {0: self.ax}
+        self.channel_to_axis.clear()
+        self.axis_colors.clear()
+        self.axis_ranges.clear()
+        
         self.draw()
         
     def get_next_color(self) -> str:
@@ -190,9 +219,9 @@ class PlotCanvas(FigureCanvas):
         self.update_plot_appearance()
         
     def _create_plot_line(self, time_array: 'np.ndarray', voltage_data: 'np.ndarray',
-                         channel_name: str, color: str, visible: bool) -> Any:
+                         channel_name: str, color: str, visible: bool, axis_obj: Any = None) -> Any:
         """
-        Create a plot line on the axes.
+        Create a plot line on the specified axes.
         
         Args:
             time_array: Time values for x-axis
@@ -200,11 +229,15 @@ class PlotCanvas(FigureCanvas):
             channel_name: Name for the legend
             color: Color for the line
             visible: Initial visibility state
+            axis_obj: Matplotlib axis object to plot on (defaults to main axis)
             
         Returns:
             Matplotlib line object
         """
-        line, = self.ax.plot(
+        # Use specified axis or default to main axis
+        target_axis = axis_obj if axis_obj is not None else self.ax
+        
+        line, = target_axis.plot(
             time_array, voltage_data, 
             label=channel_name, color=color, 
             linewidth=PLOT_LINE_WIDTH, alpha=PLOT_LINE_ALPHA,
@@ -218,7 +251,7 @@ class PlotCanvas(FigureCanvas):
     def _store_plot_data(self, channel_name: str, line: Any, channel_data: 'ChannelData',
                         time_array: 'np.ndarray', color: str, visible: bool, voltage_data: 'np.ndarray') -> None:
         """
-        Store plot data for management.
+        Store plot data for management with intelligent y-axis assignment.
         
         Args:
             channel_name: Name of the channel
@@ -229,11 +262,75 @@ class PlotCanvas(FigureCanvas):
             visible: Visibility state
             voltage_data: Voltage data array for scaling operations
         """
+        # Calculate voltage range for this channel
+        voltage_range = self._calculate_channel_range(voltage_data)
+        
+        # Determine which axis this channel should use
+        target_axis, axis_index = self._get_or_create_axis_for_channel(channel_name, voltage_range)
+        
+        # Store axis assignment
+        self.channel_to_axis[channel_name] = axis_index
+        
+        # Update axis range to include this channel
+        if axis_index in self.axis_ranges:
+            existing_min, existing_max = self.axis_ranges[axis_index]
+            new_min = min(existing_min, voltage_range[0])
+            new_max = max(existing_max, voltage_range[1])
+            self.axis_ranges[axis_index] = (new_min, new_max)
+        else:
+            self.axis_ranges[axis_index] = voltage_range
+        
         self.plot_data[channel_name] = {
             'line': line,
             'data': channel_data,
             'time': time_array,
-            'color': color
+            'color': color,
+            'voltage_range': voltage_range,
+            'axis_index': axis_index
+        }
+        self.channel_visibility[channel_name] = visible
+        
+        # Store original data and initialize scale factor
+        self.original_data[channel_name] = voltage_data.copy()
+        self.channel_scale_factors[channel_name] = 1.0
+        
+    def _store_plot_data_with_axis(self, channel_name: str, line: Any, channel_data: 'ChannelData',
+                                  time_array: 'np.ndarray', color: str, visible: bool, 
+                                  voltage_data: 'np.ndarray', voltage_range: Tuple[float, float],
+                                  axis_index: int) -> None:
+        """
+        Store plot data with pre-determined axis assignment.
+        
+        Args:
+            channel_name: Name of the channel
+            line: Matplotlib line object
+            channel_data: Original channel data
+            time_array: Time array data
+            color: Line color
+            visible: Visibility state
+            voltage_data: Voltage data array for scaling operations
+            voltage_range: Pre-calculated voltage range
+            axis_index: Pre-determined axis index
+        """
+        # Store axis assignment
+        self.channel_to_axis[channel_name] = axis_index
+        
+        # Update axis range to include this channel
+        if axis_index in self.axis_ranges:
+            existing_min, existing_max = self.axis_ranges[axis_index]
+            new_min = min(existing_min, voltage_range[0])
+            new_max = max(existing_max, voltage_range[1])
+            self.axis_ranges[axis_index] = (new_min, new_max)
+        else:
+            self.axis_ranges[axis_index] = voltage_range
+        
+        self.plot_data[channel_name] = {
+            'line': line,
+            'data': channel_data,
+            'time': time_array,
+            'color': color,
+            'voltage_range': voltage_range,
+            'axis_index': axis_index
         }
         self.channel_visibility[channel_name] = visible
         
@@ -243,7 +340,7 @@ class PlotCanvas(FigureCanvas):
         
     def set_channel_visibility(self, channel_name: str, visible: bool) -> None:
         """
-        Toggle visibility of a specific channel.
+        Toggle visibility of a specific channel and manage axis visibility.
         
         Args:
             channel_name: Name of the channel to modify
@@ -252,6 +349,15 @@ class PlotCanvas(FigureCanvas):
         if channel_name in self.plot_data:
             self.plot_data[channel_name]['line'].set_visible(visible)
             self.channel_visibility[channel_name] = visible
+            
+            # Get the axis this channel is assigned to
+            axis_index = self.plot_data[channel_name].get('axis_index', 0)
+            
+            # Check if this axis should be hidden/shown based on channel visibility
+            self._update_axis_visibility(axis_index)
+            
+            # Recalculate axis ranges when channels are toggled
+            self._recalculate_axis_ranges()
             
             # Update plot appearance
             self.update_plot_appearance()
@@ -274,15 +380,22 @@ class PlotCanvas(FigureCanvas):
             color = plot_data['color']
             visible = plot_data['visible']
             
-            # Create the plot line
+            # First determine which axis to use
+            voltage_range = self._calculate_channel_range(voltage_data)
+            target_axis, axis_index = self._get_or_create_axis_for_channel(channel_name, voltage_range)
+            
+            print(f"Assigning {channel_name} to axis {axis_index} with range {voltage_range}")
+            
+            # Create the plot line on the correct axis
             line = self._create_plot_line(
-                time_array, voltage_data, channel_name, color, visible
+                time_array, voltage_data, channel_name, color, visible, target_axis
             )
             
-            # Store the plot data
-            self._store_plot_data(
+            # Store the plot data with axis information
+            self._store_plot_data_with_axis(
                 channel_name, line, plot_data['channel_data'], 
-                time_array, color, visible, voltage_data
+                time_array, color, visible, voltage_data, 
+                voltage_range, axis_index
             )
             
             # Queue UI update instead of immediate draw
@@ -290,13 +403,18 @@ class PlotCanvas(FigureCanvas):
             
         except Exception as e:
             print(f"Error applying plot data for {plot_data.get('channel_name', 'unknown')}: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.plot_mutex.unlock()
     
     def apply_batch_plot_data(self, plot_results: Dict[str, Dict[str, Any]], 
                              overlay_mode: bool = True) -> None:
         """
-        Apply multiple plot data entries in a batch to improve performance.
+        Apply multiple plot data entries in a batch with optimal axis assignment.
+        
+        This method uses intelligent grouping to determine optimal y-axis assignments
+        upfront, creating a better initial display with proper engineering scaling.
         
         Args:
             plot_results: Dictionary of channel_name -> plot_data mappings
@@ -304,29 +422,65 @@ class PlotCanvas(FigureCanvas):
         """
         self.plot_mutex.lock()
         try:
-            # Process all channels without drawing
-            for channel_name, plot_data in plot_results.items():
-                time_array = plot_data['time_array']
-                voltage_data = plot_data['voltage_data']
-                color = plot_data['color']
-                visible = plot_data['visible']
-                
-                # Create the plot line
-                line = self._create_plot_line(
-                    time_array, voltage_data, channel_name, color, visible
-                )
-                
-                # Store the plot data
-                self._store_plot_data(
-                    channel_name, line, plot_data['channel_data'],
-                    time_array, color, visible, voltage_data
-                )
+            if not plot_results:
+                return
             
-            # Update plot appearance once for all channels
+            # Phase 1: Collect all channel voltage ranges
+            channel_ranges = {}
+            channel_data_dict = {}
+            
+            for channel_name, plot_data in plot_results.items():
+                voltage_data = plot_data['voltage_data']
+                voltage_range = self._calculate_channel_range(voltage_data)
+                channel_ranges[channel_name] = voltage_range
+                channel_data_dict[channel_name] = plot_data
+            
+            # Phase 2: Use group_channels_by_scale to determine optimal axis assignments
+            # Convert channel_ranges to the expected format for group_channels_by_scale
+            channels_data_for_grouping = {
+                channel_name: {'voltage_range': voltage_range}
+                for channel_name, voltage_range in channel_ranges.items()
+            }
+            axis_groups = group_channels_by_scale(channels_data_for_grouping)
+            
+            # Phase 3: Create necessary y-axes upfront
+            self._create_axes_for_groups(axis_groups, channel_data_dict)
+            
+            # Phase 4: Plot channels on their assigned axes
+            for axis_idx, channel_list in axis_groups.items():
+                for channel_name in channel_list:
+                    plot_data = plot_results[channel_name]
+                    time_array = plot_data['time_array']
+                    voltage_data = plot_data['voltage_data']
+                    color = plot_data['color']
+                    visible = plot_data['visible']
+                    
+                    # Get the axis for this channel
+                    target_axis = self.axes_dict[axis_idx]
+                    
+                    # Create the plot line on the assigned axis
+                    line = self._create_plot_line(
+                        time_array, voltage_data, channel_name, color, visible, target_axis
+                    )
+                    
+                    # Store the plot data with predetermined axis assignment
+                    voltage_range = channel_ranges[channel_name]
+                    self._store_plot_data_with_axis(
+                        channel_name, line, plot_data['channel_data'],
+                        time_array, color, visible, voltage_data,
+                        voltage_range, axis_idx
+                    )
+            
+            # Phase 5: Apply engineering scaling to all axes with optimal screen utilization
+            self._apply_engineering_scaling_to_all_axes()
+            
+            # Phase 6: Update plot appearance once for all channels
             self.update_plot_appearance()
             
         except Exception as e:
             print(f"Error applying batch plot data: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.plot_mutex.unlock()
     
@@ -353,24 +507,49 @@ class PlotCanvas(FigureCanvas):
         self.ax.set_ylabel(PLOT_YLABEL)
         self.ax.grid(True, alpha=PLOT_GRID_ALPHA)
         
-        # Update legend to only show visible channels
+        # Update legend to only show visible channels from all axes
         handles = []
         labels = []
-        for ch_name, plot_info in self.plot_data.items():
-            if self.channel_visibility.get(ch_name, False):
-                handles.append(plot_info['line'])
-                labels.append(ch_name)
+        
+        # Collect all visible lines from all axes, organized by axis for better grouping
+        for axis_idx in sorted(self.axes_dict.keys()):
+            axis_handles = []
+            axis_labels = []
+            
+            for ch_name, plot_info in self.plot_data.items():
+                if (self.channel_visibility.get(ch_name, False) and 
+                    plot_info.get('axis_index', 0) == axis_idx):
+                    axis_handles.append(plot_info['line'])
+                    axis_labels.append(ch_name)
+            
+            # Add this axis's channels to the overall legend
+            handles.extend(axis_handles)
+            labels.extend(axis_labels)
         
         if handles:
-            # Use specified location for better performance with large datasets
+            # Create legend on main axis but include all visible channels from all axes
             self.ax.legend(handles, labels, loc=PLOT_LEGEND_LOCATION)
         else:
             if self.ax.get_legend():
                 self.ax.get_legend().set_visible(False)
         
-        # Auto-scale the view
-        self.ax.relim()
-        self.ax.autoscale()
+        # Ensure all secondary axes don't have their own legends to avoid conflicts
+        for axis_idx, axis_obj in self.axes_dict.items():
+            if axis_idx != 0 and axis_obj.get_legend():
+                axis_obj.get_legend().set_visible(False)
+        
+        # Apply engineering scaling and visual styling to each axis
+        for axis_idx, voltage_range in self.axis_ranges.items():
+            if axis_idx in self.axes_dict:
+                axis_obj = self.axes_dict[axis_idx]
+                self._apply_engineering_scaling_to_axis(axis_obj, voltage_range)
+                self._style_axis_appearance(axis_obj, axis_idx)
+                print(f"Applied engineering scaling to axis {axis_idx}: range {voltage_range}")
+        
+        # If no specific axis ranges, fall back to auto-scaling for main axis only
+        if not self.axis_ranges:
+            self.ax.relim()
+            self.ax.autoscale()
         
         # Update title with channel info
         num_visible = sum(self.channel_visibility.values())
@@ -381,12 +560,15 @@ class PlotCanvas(FigureCanvas):
             
     def remove_channel(self, channel_name: str) -> None:
         """
-        Remove a channel from the plot entirely.
+        Remove a channel from the plot entirely with axes cleanup.
         
         Args:
             channel_name: Name of the channel to remove
         """
         if channel_name in self.plot_data:
+            # Get the axis this channel was using before removal
+            axis_index = self.plot_data[channel_name].get('axis_index', 0)
+            
             # Remove the line from the plot
             self.plot_data[channel_name]['line'].remove()
             
@@ -394,6 +576,15 @@ class PlotCanvas(FigureCanvas):
             del self.plot_data[channel_name]
             if channel_name in self.channel_visibility:
                 del self.channel_visibility[channel_name]
+            if channel_name in self.channel_to_axis:
+                del self.channel_to_axis[channel_name]
+            if channel_name in self.channel_scale_factors:
+                del self.channel_scale_factors[channel_name]
+            if channel_name in self.original_data:
+                del self.original_data[channel_name]
+            
+            # Clean up unused axes
+            self._cleanup_unused_axes()
             
             if self.plot_data:
                 # Update plot appearance
@@ -440,6 +631,471 @@ class PlotCanvas(FigureCanvas):
             True if there is plotted data, False otherwise
         """
         return len(self.plot_data) > 0
+    
+    # ==================== Multiple Y-Axis Support Methods ====================
+    
+    def _create_additional_yaxis(self, axis_index: int, color: str) -> Any:
+        """
+        Create an additional y-axis using matplotlib's twinx().
+        
+        Args:
+            axis_index: Index for the new axis
+            color: Representative color for the axis
+            
+        Returns:
+            New matplotlib axes object
+        """
+        # Create twin axis
+        new_ax = self.ax.twinx()
+        
+        # Position axis based on index
+        positions = calculate_axis_positions(axis_index + 1)
+        if axis_index < len(positions):
+            side, offset = positions[axis_index]
+            if side == 'right' and offset > 0:
+                # Move spine to avoid overlap
+                new_ax.spines['right'].set_position(('outward', offset * 60))
+            elif side == 'left' and offset != 0:
+                new_ax.spines['left'].set_position(('outward', abs(offset) * 60))
+                new_ax.yaxis.set_label_position('left')
+                new_ax.yaxis.tick_left()
+        
+        # Store the axis and its color
+        self.axes_dict[axis_index] = new_ax
+        self.axis_colors[axis_index] = color
+        
+        return new_ax
+    
+    def _get_or_create_axis_for_channel(self, channel_name: str, 
+                                       voltage_range: Tuple[float, float]) -> Tuple[Any, int]:
+        """
+        Determine which axis a channel should use or create a new one if needed.
+        
+        Args:
+            channel_name: Name of the channel
+            voltage_range: (min, max) voltage range for the channel
+            
+        Returns:
+            Tuple of (matplotlib_axis, axis_index)
+        """
+        # Check if we can use an existing axis
+        for axis_idx, axis_range in self.axis_ranges.items():
+            existing_ranges = [axis_range, voltage_range]
+            if not should_use_separate_axes(existing_ranges):
+                # Can share this axis
+                return self.axes_dict[axis_idx], axis_idx
+        
+        # Need new axis if we have multiple ranges that require separation
+        if len(self.axis_ranges) > 0:
+            all_ranges = list(self.axis_ranges.values()) + [voltage_range]
+            if should_use_separate_axes(all_ranges):
+                # Create new axis
+                new_axis_idx = max(self.axes_dict.keys()) + 1
+                # Use the first channel's color for this axis
+                color = self.get_next_color()
+                new_axis = self._create_additional_yaxis(new_axis_idx, color)
+                self.axis_ranges[new_axis_idx] = voltage_range
+                return new_axis, new_axis_idx
+        
+        # Use existing axis 0 (default)
+        if 0 not in self.axis_ranges:
+            self.axis_ranges[0] = voltage_range
+        return self.axes_dict[0], 0
+    
+    def _calculate_channel_range(self, voltage_data: 'np.ndarray') -> Tuple[float, float]:
+        """
+        Calculate the voltage range for a channel's data.
+        
+        Args:
+            voltage_data: Numpy array of voltage values
+            
+        Returns:
+            Tuple of (min_value, max_value)
+        """
+        if len(voltage_data) == 0:
+            return (0.0, 1.0)
+        
+        min_val = float(np.min(voltage_data))
+        max_val = float(np.max(voltage_data))
+        
+        # Handle case where all values are the same
+        if min_val == max_val:
+            if abs(min_val) < 1e-12:
+                return (-1.0, 1.0)
+            else:
+                margin = abs(min_val) * 0.1
+                return (min_val - margin, max_val + margin)
+        
+        return (min_val, max_val)
+    
+    def _apply_engineering_scaling_to_axis(self, axis_obj: Any, 
+                                          voltage_range: Tuple[float, float]) -> None:
+        """
+        Apply engineering-friendly scaling to a specific axis.
+        
+        Args:
+            axis_obj: Matplotlib axis object
+            voltage_range: (min, max) range for the axis
+        """
+        min_val, max_val = voltage_range
+        
+        # Calculate engineering-friendly range with improved centering
+        y_min, y_max = calculate_engineering_range(min_val, max_val)
+        
+        # Debug output
+        print(f"Engineering scaling for axis: data range [{min_val:.6f}, {max_val:.6f}] -> axis range [{y_min:.6f}, {y_max:.6f}]")
+        
+        # Set axis limits
+        axis_obj.set_ylim(y_min, y_max)
+        
+        # Set engineering-friendly tick values
+        tick_values = get_engineering_tick_values(y_min, y_max, target_ticks=8)
+        axis_obj.set_yticks(tick_values)
+        print(f"Tick values: {tick_values}")
+        
+        # Format tick labels with engineering notation if beneficial
+        max_abs_val = max(abs(y_min), abs(y_max))
+        print(f"Max absolute value for formatting decision: {max_abs_val}")
+        
+        if max_abs_val >= 1000 or max_abs_val < 1.0:
+            tick_labels = [format_engineering_value(val) for val in tick_values]
+            axis_obj.set_yticklabels(tick_labels)
+            print(f"Applied engineering formatted tick labels: {tick_labels}")
+        else:
+            print(f"Using default tick labels (no engineering formatting needed for range {max_abs_val})")
+    
+    def _style_axis_appearance(self, axis_obj: Any, axis_index: int) -> None:
+        """
+        Apply visual styling to a specific axis including color coding and labels.
+        
+        Args:
+            axis_obj: Matplotlib axis object
+            axis_index: Index of the axis for styling reference
+        """
+        # Get representative color for this axis
+        axis_color = self.axis_colors.get(axis_index, 'black')
+        
+        # Get the first channel using this axis to determine its color
+        first_channel_color = None
+        for channel_name, plot_info in self.plot_data.items():
+            if plot_info.get('axis_index') == axis_index and self.channel_visibility.get(channel_name, False):
+                first_channel_color = plot_info['color']
+                break
+        
+        # Use the first channel's color if available, otherwise use stored axis color
+        display_color = first_channel_color if first_channel_color else axis_color
+        
+        # Color-code the y-axis tick labels and spine
+        axis_obj.tick_params(axis='y', colors=display_color, labelsize=9)
+        
+        # Get all channels assigned to this axis
+        channels_for_axis = self._get_channels_for_axis(axis_index)
+        visible_channels = [ch for ch in channels_for_axis if self.channel_visibility.get(ch, False)]
+        
+        # Create channel-based label
+        if visible_channels:
+            # Always join with comma for consistency, whether single or multiple channels
+            axis_label = ", ".join(sorted(visible_channels))
+        else:
+            # No visible channels - generic label
+            axis_label = "Voltage"
+        
+        # Add appropriate units based on the axis range
+        if axis_index in self.axis_ranges:
+            min_val, max_val = self.axis_ranges[axis_index]
+            max_abs_val = max(abs(min_val), abs(max_val))
+            
+            if max_abs_val >= 1.0:
+                unit_suffix = " (V)"
+            elif max_abs_val >= 0.001:
+                unit_suffix = " (mV)"
+            elif max_abs_val >= 0.000001:
+                unit_suffix = " (μV)"
+            else:
+                unit_suffix = " (nV)"
+        else:
+            unit_suffix = " (V)"
+        
+        final_label = axis_label + unit_suffix
+        
+        # Set y-axis label with appropriate color
+        if axis_index == 0:
+            # Main (left) axis
+            axis_obj.set_ylabel(final_label, color=display_color, fontsize=10)
+            axis_obj.spines['left'].set_color(display_color)
+        else:
+            # Secondary (right) axes
+            axis_obj.set_ylabel(final_label, color=display_color, fontsize=10)
+            axis_obj.spines['right'].set_color(display_color)
+            
+            # For right axes, make sure the spine is visible and colored
+            axis_obj.spines['right'].set_visible(True)
+            axis_obj.spines['right'].set_linewidth(1.2)
+        
+        # Ensure appropriate spine visibility
+        if axis_index == 0:
+            # Main axis - show left spine
+            axis_obj.spines['left'].set_visible(True)
+            axis_obj.spines['left'].set_linewidth(1.2)
+        
+        # Hide top and bottom spines for cleaner look
+        axis_obj.spines['top'].set_visible(False)
+        axis_obj.spines['bottom'].set_visible(False)
+    
+    def _get_channels_for_axis(self, axis_index: int) -> List[str]:
+        """
+        Get list of channel names assigned to a specific axis.
+        
+        Args:
+            axis_index: Index of the axis
+            
+        Returns:
+            List of channel names using the specified axis
+        """
+        return [
+            channel_name for channel_name, plot_info in self.plot_data.items()
+            if plot_info.get('axis_index') == axis_index
+        ]
+    
+    def get_axis_for_channel(self, channel_name: str) -> Optional[Any]:
+        """
+        Get the matplotlib axis object for a specific channel.
+        
+        Args:
+            channel_name: Name of the channel
+            
+        Returns:
+            Matplotlib axis object, or None if channel not found
+        """
+        axis_idx = self.channel_to_axis.get(channel_name)
+        if axis_idx is not None:
+            return self.axes_dict.get(axis_idx)
+        return None
+    
+    def get_channel_axis_index(self, channel_name: str) -> Optional[int]:
+        """
+        Get the axis index for a specific channel.
+        
+        Args:
+            channel_name: Name of the channel
+            
+        Returns:
+            Axis index, or None if channel not found
+        """
+        return self.channel_to_axis.get(channel_name)
+    
+    def _update_axis_visibility(self, axis_index: int) -> None:
+        """
+        Update the visibility of an axis based on its assigned channels.
+        
+        Args:
+            axis_index: Index of the axis to check
+        """
+        if axis_index in self.axes_dict:
+            axis_obj = self.axes_dict[axis_index]
+            
+            # Check if any channels on this axis are visible
+            has_visible_channels = False
+            for channel_name, plot_info in self.plot_data.items():
+                if (plot_info.get('axis_index') == axis_index and 
+                    self.channel_visibility.get(channel_name, False)):
+                    has_visible_channels = True
+                    break
+            
+            # Show/hide the axis based on channel visibility
+            if axis_index == 0:
+                # Main axis is always visible (but we can gray out its components)
+                if has_visible_channels:
+                    axis_obj.tick_params(axis='y', colors='black', labelsize=9)
+                    axis_obj.spines['left'].set_visible(True)
+                else:
+                    axis_obj.tick_params(axis='y', colors='lightgray', labelsize=9)
+                    axis_obj.spines['left'].set_color('lightgray')
+            else:
+                # Secondary axes can be fully hidden
+                if has_visible_channels:
+                    axis_obj.set_visible(True)
+                    axis_obj.spines['right'].set_visible(True)
+                else:
+                    axis_obj.set_visible(False)
+    
+    def _recalculate_axis_ranges(self) -> None:
+        """
+        Recalculate axis ranges based on currently visible channels.
+        """
+        # Clear existing ranges
+        new_axis_ranges = {}
+        
+        # Recalculate range for each axis based on visible channels
+        for axis_index in self.axes_dict.keys():
+            visible_channels = [
+                channel_name for channel_name, plot_info in self.plot_data.items()
+                if (plot_info.get('axis_index') == axis_index and 
+                    self.channel_visibility.get(channel_name, False))
+            ]
+            
+            if visible_channels:
+                # Calculate combined range for all visible channels on this axis
+                all_mins = []
+                all_maxs = []
+                
+                for channel_name in visible_channels:
+                    voltage_range = self.plot_data[channel_name]['voltage_range']
+                    all_mins.append(voltage_range[0])
+                    all_maxs.append(voltage_range[1])
+                
+                if all_mins and all_maxs:
+                    new_axis_ranges[axis_index] = (min(all_mins), max(all_maxs))
+        
+        # Update the axis ranges
+        self.axis_ranges = new_axis_ranges
+    
+    def _cleanup_unused_axes(self) -> None:
+        """
+        Remove unused y-axes and reorganize indices to prevent clutter.
+        """
+        # Find which axes are still in use
+        axes_in_use = set()
+        for plot_info in self.plot_data.values():
+            axis_idx = plot_info.get('axis_index', 0)
+            axes_in_use.add(axis_idx)
+        
+        # Remove unused axes (except axis 0, which is always kept)
+        axes_to_remove = []
+        for axis_idx, axis_obj in self.axes_dict.items():
+            if axis_idx != 0 and axis_idx not in axes_in_use:
+                axes_to_remove.append(axis_idx)
+                axis_obj.remove()  # Remove from matplotlib figure
+                print(f"Removed unused axis {axis_idx}")
+        
+        # Clean up dictionaries
+        for axis_idx in axes_to_remove:
+            if axis_idx in self.axes_dict:
+                del self.axes_dict[axis_idx]
+            if axis_idx in self.axis_colors:
+                del self.axis_colors[axis_idx]
+            if axis_idx in self.axis_ranges:
+                del self.axis_ranges[axis_idx]
+        
+        # Reorganize axis indices to maintain sequential ordering
+        if len(axes_to_remove) > 0:
+            self._reorganize_axis_indices()
+    
+    def _reorganize_axis_indices(self) -> None:
+        """
+        Reorganize axis indices to maintain sequential ordering after cleanup.
+        
+        This ensures axes are numbered 0, 1, 2, ... without gaps.
+        """
+        # Get current axis indices sorted
+        current_indices = sorted(self.axes_dict.keys())
+        
+        # Create mapping from old indices to new sequential indices
+        index_mapping = {}
+        new_index = 0
+        for old_index in current_indices:
+            index_mapping[old_index] = new_index
+            new_index += 1
+        
+        # Update all dictionaries with new indices
+        if len(index_mapping) > 1:  # Only reorganize if there are multiple axes
+            # Reorganize axes_dict
+            new_axes_dict = {}
+            for old_idx, new_idx in index_mapping.items():
+                new_axes_dict[new_idx] = self.axes_dict[old_idx]
+            self.axes_dict = new_axes_dict
+            
+            # Reorganize axis_colors
+            new_axis_colors = {}
+            for old_idx, new_idx in index_mapping.items():
+                if old_idx in self.axis_colors:
+                    new_axis_colors[new_idx] = self.axis_colors[old_idx]
+            self.axis_colors = new_axis_colors
+            
+            # Reorganize axis_ranges
+            new_axis_ranges = {}
+            for old_idx, new_idx in index_mapping.items():
+                if old_idx in self.axis_ranges:
+                    new_axis_ranges[new_idx] = self.axis_ranges[old_idx]
+            self.axis_ranges = new_axis_ranges
+            
+            # Update channel_to_axis mappings
+            for channel_name in self.channel_to_axis:
+                old_axis_idx = self.channel_to_axis[channel_name]
+                if old_axis_idx in index_mapping:
+                    self.channel_to_axis[channel_name] = index_mapping[old_axis_idx]
+            
+            # Update plot_data axis indices
+            for plot_info in self.plot_data.values():
+                old_axis_idx = plot_info.get('axis_index', 0)
+                if old_axis_idx in index_mapping:
+                    plot_info['axis_index'] = index_mapping[old_axis_idx]
+            
+            print(f"Reorganized axes: {dict(index_mapping)} -> sequential indices")
+    
+    def _create_axes_for_groups(self, axis_groups: Dict[int, List[str]], 
+                               channel_data_dict: Dict[str, Dict[str, Any]]) -> None:
+        """
+        Create necessary y-axes upfront based on grouping results.
+        
+        Args:
+            axis_groups: Dictionary mapping axis indices to lists of channel names
+            channel_data_dict: Dictionary containing all channel plot data
+        """
+        for axis_idx, channel_list in axis_groups.items():
+            if axis_idx == 0:
+                # Axis 0 always exists (main axis)
+                continue
+            
+            # Get representative color from first channel in this group
+            if channel_list:
+                first_channel_name = channel_list[0]
+                if first_channel_name in channel_data_dict:
+                    color = channel_data_dict[first_channel_name]['color']
+                else:
+                    color = self.get_next_color()
+            else:
+                color = self.get_next_color()
+            
+            # Create the axis
+            new_axis = self._create_additional_yaxis(axis_idx, color)
+            print(f"Created axis {axis_idx} for channels: {channel_list}")
+    
+    def _apply_engineering_scaling_to_all_axes(self) -> None:
+        """
+        Apply engineering scaling to all axes with optimal screen utilization.
+        
+        This method calculates combined ranges for each axis and applies
+        engineering-friendly scaling with 90% screen utilization.
+        """
+        print("Applying engineering scaling to all axes")
+        
+        # Calculate combined ranges for each axis
+        for axis_idx in self.axes_dict.keys():
+            # Get all channels assigned to this axis
+            channels_for_axis = [
+                name for name, plot_info in self.plot_data.items()
+                if plot_info.get('axis_index', 0) == axis_idx
+            ]
+            
+            if channels_for_axis:
+                # Calculate combined voltage range for this axis
+                all_mins = []
+                all_maxs = []
+                
+                for channel_name in channels_for_axis:
+                    if channel_name in self.plot_data:
+                        voltage_range = self.plot_data[channel_name]['voltage_range']
+                        all_mins.append(voltage_range[0])
+                        all_maxs.append(voltage_range[1])
+                
+                if all_mins and all_maxs:
+                    combined_range = (min(all_mins), max(all_maxs))
+                    self.axis_ranges[axis_idx] = combined_range
+                    
+                    print(f"Axis {axis_idx} combined range: {combined_range} for channels {channels_for_axis}")
+        
+        print(f"Final axis ranges: {self.axis_ranges}")
     
     # ==================== Interactive Selection Methods ====================
     
@@ -640,3 +1296,70 @@ class PlotCanvas(FigureCanvas):
         This is called after a short delay following a scroll event.
         """
         self.scroll_in_progress = False
+    
+    def zoom_to_fit_all_axes(self) -> None:
+        """
+        Auto-scale all y-axes to fit all visible data with engineering-friendly scaling.
+        
+        This method recalculates the optimal ranges for all axes based on currently
+        visible channels and applies engineering scaling to each axis independently.
+        """
+        print("Zoom to fit all axes")
+        
+        if not self.plot_data:
+            print("No plot data available for zoom to fit")
+            return
+        
+        # Recalculate axis ranges based on visible channels
+        self._recalculate_axis_ranges()
+        
+        # Apply engineering scaling to all axes
+        self._apply_engineering_scaling_to_all_axes()
+        
+        # Update plot appearance
+        self.update_plot_appearance()
+        
+        print(f"Zoom to fit complete. Axis ranges: {self.axis_ranges}")
+    
+    def reset_all_axes_scales(self) -> None:
+        """
+        Reset all Y-axes scaling to auto-scaled engineering values.
+        
+        This method resets all channel scaling factors to 1.0, restores original data,
+        and recalculates optimal engineering-friendly axis ranges for all axes.
+        """
+        print("Reset all axes scales")
+        
+        if not self.plot_data:
+            print("No plot data available for scale reset")
+            return
+        
+        # Reset all channel scale factors to 1.0
+        for channel_name in self.channel_scale_factors:
+            self.channel_scale_factors[channel_name] = 1.0
+        
+        # Restore original data for all channels
+        for channel_name, plot_info in self.plot_data.items():
+            if channel_name in self.original_data:
+                original_data = self.original_data[channel_name]
+                line = plot_info['line']
+                line.set_ydata(original_data)
+                
+                # Recalculate voltage range based on original data
+                voltage_range = self._calculate_channel_range(original_data)
+                plot_info['voltage_range'] = voltage_range
+                
+                # Remove any stored scaled data
+                if 'scaled_data' in plot_info:
+                    del plot_info['scaled_data']
+        
+        # Recalculate axis ranges based on reset data
+        self._recalculate_axis_ranges()
+        
+        # Apply engineering scaling to all axes
+        self._apply_engineering_scaling_to_all_axes()
+        
+        # Update plot appearance
+        self.update_plot_appearance()
+        
+        print(f"Scale reset complete. Axis ranges: {self.axis_ranges}")

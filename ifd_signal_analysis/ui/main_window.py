@@ -199,6 +199,13 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         reset_selected_action.triggered.connect(self.reset_selected_channel_scale)
         view_menu.addAction(reset_selected_action)
         
+        # Reset All Axes Scale action
+        reset_all_action = QAction('Reset All Axes Scales', self)
+        reset_all_action.setShortcut('Shift+R')
+        reset_all_action.setStatusTip('Reset all Y-axes to auto-scaled engineering values')
+        reset_all_action.triggered.connect(self.reset_all_axes_scales)
+        view_menu.addAction(reset_all_action)
+        
         # Clear Selection action
         clear_selection_action = QAction('Clear Selection', self)
         clear_selection_action.setShortcut('Escape')
@@ -540,9 +547,9 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     
     def _on_channel_plotted(self, channel_name: str, plot_data: Dict[str, Any]) -> None:
         """Handle individual channel plot completion (progressive rendering)."""
-        # Apply the plot data to the canvas immediately for progressive display
-        overlay_mode = True  # Default to overlay mode
-        self.plot_canvas.apply_plot_data(plot_data, overlay_mode)
+        # Skip progressive rendering - we'll use batch auto-scaling instead
+        # This reduces rendering operations and enables optimal axis assignment
+        pass
     
     def _on_plotting_finished(self, result: Dict[str, Any]) -> None:
         """Handle successful completion of plotting."""
@@ -553,7 +560,13 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
                 self.progress_dialog = None
                 
             total_channels = result['total_channels']
+            plot_data = result.get('plot_data', {})
+            overlay_mode = result.get('overlay_mode', True)
             
+            # Apply batch plot data with auto-scaling if we have any plot data
+            if plot_data:
+                self.plot_canvas.apply_batch_plot_data(plot_data, overlay_mode)
+                
             # Update status
             self.channel_count_label.setText(f'{total_channels} channel(s) loaded')
             self.status_bar.showMessage(
@@ -626,11 +639,9 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             self.status_bar.showMessage(SUCCESS_CLEAR_MESSAGE, STATUS_MESSAGE_MEDIUM)
             
     def zoom_to_fit(self) -> None:
-        """Auto-scale the plot to fit all visible data."""
+        """Auto-scale the plot to fit all visible data across all y-axes."""
         if self.plot_canvas.has_data():
-            self.plot_canvas.ax.relim()
-            self.plot_canvas.ax.autoscale()
-            self.plot_canvas.draw()
+            self.plot_canvas.zoom_to_fit_all_axes()
             self.status_bar.showMessage(SUCCESS_ZOOM_FIT_MESSAGE, STATUS_MESSAGE_SHORT)
         
     def save_plot(self) -> None:
@@ -673,6 +684,20 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             QMessageBox.information(
                 self, 'No Selection', 
                 'Please select a channel first to reset its scale.'
+            )
+            
+    def reset_all_axes_scales(self) -> None:
+        """Reset all Y-axes scaling to auto-scaled engineering values."""
+        if self.plot_canvas.has_data():
+            self.plot_canvas.reset_all_axes_scales()
+            self.status_bar.showMessage(
+                'Reset all axis scales to auto-scaled values', 
+                STATUS_MESSAGE_SHORT
+            )
+        else:
+            QMessageBox.information(
+                self, 'No Data', 
+                'No data available to reset scales.'
             )
         
     def show_about_dialog(self) -> None:
