@@ -190,6 +190,22 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         zoom_fit_action.triggered.connect(self.zoom_to_fit)
         view_menu.addAction(zoom_fit_action)
         
+        view_menu.addSeparator()
+        
+        # Reset Channel Scale action
+        reset_selected_action = QAction('Reset Selected Channel Scale', self)
+        reset_selected_action.setShortcut('R')
+        reset_selected_action.setStatusTip('Reset Y-axis scaling for the selected channel')
+        reset_selected_action.triggered.connect(self.reset_selected_channel_scale)
+        view_menu.addAction(reset_selected_action)
+        
+        # Clear Selection action
+        clear_selection_action = QAction('Clear Selection', self)
+        clear_selection_action.setShortcut('Escape')
+        clear_selection_action.setStatusTip('Clear the current channel selection')
+        clear_selection_action.triggered.connect(self._clear_channel_selection)
+        view_menu.addAction(clear_selection_action)
+        
     def _create_help_menu(self, menubar: 'QMenuBar') -> None:
         """Create the Help menu."""
         help_menu = menubar.addMenu('&Help')
@@ -270,74 +286,46 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         
         # Channel list section
-        channel_group = QGroupBox('Loaded Channels')
+        channel_group = QGroupBox('Channel Management')
         channel_layout = QVBoxLayout(channel_group)
         
         self.channel_list = ChannelListWidget()
         self.channel_list.channel_visibility_changed.connect(self._on_channel_visibility_changed)
         self.channel_list.channel_removed.connect(self._on_channel_removed)
+        self.channel_list.channel_selected.connect(self._on_channel_selected_from_list)
         channel_layout.addWidget(self.channel_list)
         
         layout.addWidget(channel_group)
         
-        # Display controls section
-        layout.addWidget(self._create_display_controls())
-        
-        # File info section
-        layout.addWidget(self._create_file_info_section())
+        # Quick action buttons (minimal set)
+        layout.addWidget(self._create_quick_actions())
         
         # Add stretch to push everything to top
         layout.addStretch()
         
         return panel
     
-    def _create_display_controls(self) -> QWidget:
-        """Create the display controls section."""
-        controls_group = QGroupBox('Display Controls')
-        controls_layout = QVBoxLayout(controls_group)
+    def _create_quick_actions(self) -> QWidget:
+        """Create minimal quick action controls."""
+        actions_group = QGroupBox('Quick Actions')
+        actions_layout = QVBoxLayout(actions_group)
         
-        # View mode selection
-        view_layout = QHBoxLayout()
-        view_layout.addWidget(QLabel('View Mode:'))
-        
-        self.overlay_radio = QRadioButton('Overlay')
-        self.overlay_radio.setChecked(True)
-        self.separate_radio = QRadioButton('Separate')
-        
-        view_layout.addWidget(self.overlay_radio)
-        view_layout.addWidget(self.separate_radio)
-        view_layout.addStretch()
-        
-        controls_layout.addLayout(view_layout)
-        
-        # Quick action buttons
-        button_layout = QVBoxLayout()
-        
+        # Essential buttons only
         zoom_fit_btn = QPushButton('🔍 Zoom to Fit')
         zoom_fit_btn.clicked.connect(self.zoom_to_fit)
-        button_layout.addWidget(zoom_fit_btn)
+        actions_layout.addWidget(zoom_fit_btn)
         
         save_plot_btn = QPushButton('💾 Save Plot...')
         save_plot_btn.clicked.connect(self.save_plot)
-        button_layout.addWidget(save_plot_btn)
+        actions_layout.addWidget(save_plot_btn)
         
-        controls_layout.addLayout(button_layout)
+        # Reset button for selected channel
+        reset_btn = QPushButton('🔄 Reset Selected Scale')
+        reset_btn.clicked.connect(self.reset_selected_channel_scale)
+        actions_layout.addWidget(reset_btn)
         
-        return controls_group
+        return actions_group
     
-    def _create_file_info_section(self) -> QWidget:
-        """Create the file information section."""
-        info_group = QGroupBox('File Information')
-        info_layout = QVBoxLayout(info_group)
-        
-        self.info_text = QTextEdit()
-        self.info_text.setReadOnly(True)
-        self.info_text.setMaximumHeight(INFO_WIDGET_MAX_HEIGHT)
-        self.info_text.setFont(QFont(INFO_FONT_FAMILY, INFO_FONT_SIZE))
-        self.info_text.setPlainText(DEFAULT_INFO_TEXT)
-        
-        info_layout.addWidget(self.info_text)
-        return info_group
         
     def _create_plot_panel(self) -> QWidget:
         """Create the right panel containing the matplotlib plot canvas."""
@@ -348,6 +336,9 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         
         # Create the plot canvas
         self.plot_canvas = PlotCanvas()
+        
+        # Connect plot canvas selection signal
+        self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
         
         # Create navigation toolbar
         self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
@@ -371,15 +362,12 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         if self.settings.contains('geometry'):
             self.restoreGeometry(self.settings.value('geometry'))
         
-        # Restore other settings as needed
-        overlay_mode = self.settings.value('overlay_mode', True, type=bool)
-        self.overlay_radio.setChecked(overlay_mode)
-        self.separate_radio.setChecked(not overlay_mode)
+        # Note: View mode settings removed with display controls
         
     def _save_settings(self) -> None:
         """Save application settings to persistent storage."""
         self.settings.setValue('geometry', self.saveGeometry())
-        self.settings.setValue('overlay_mode', self.overlay_radio.isChecked())
+        # Note: View mode settings removed with display controls
         
     # ==================== File Operations ====================
     
@@ -486,8 +474,6 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
                 if channel_data.enabled and len(channel_data.voltage_data) > 0:
                     self.channel_list.add_channel(channel_name, channel_data, visible=True)
             
-            # Update file info display
-            self._update_file_info(parser, source_path, channels)
             
             # Start background plotting instead of direct plotting
             self._start_plotting(channels, parser)
@@ -522,8 +508,8 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             self.progress_dialog.setWindowTitle("Rendering Plots")
             self.progress_dialog.start_loading(RENDERING_PLOTS_DESC)
         
-        # Get overlay mode
-        overlay_mode = self.overlay_radio.isChecked()
+        # Default to overlay mode (since display controls removed)
+        overlay_mode = True
         
         # Create and start the plotting thread
         self.plot_thread = PlottingThread(channels, parser.header, overlay_mode)
@@ -555,7 +541,7 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     def _on_channel_plotted(self, channel_name: str, plot_data: Dict[str, Any]) -> None:
         """Handle individual channel plot completion (progressive rendering)."""
         # Apply the plot data to the canvas immediately for progressive display
-        overlay_mode = self.overlay_radio.isChecked()
+        overlay_mode = True  # Default to overlay mode
         self.plot_canvas.apply_plot_data(plot_data, overlay_mode)
     
     def _on_plotting_finished(self, result: Dict[str, Any]) -> None:
@@ -634,7 +620,6 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             # Clear UI components
             self.channel_list.clear_all_channels()
             self.plot_canvas.clear_all_plots()
-            self.info_text.setPlainText(DEFAULT_INFO_TEXT)
             
             # Update status
             self.channel_count_label.setText('No data loaded')
@@ -673,6 +658,22 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
                     self, 'Save Error', 
                     f'Failed to save plot:\n{str(e)}'
                 )
+    
+    def reset_selected_channel_scale(self) -> None:
+        """Reset the Y-axis scaling for the currently selected channel."""
+        selected_channel = self.plot_canvas.get_selected_channel()
+        if selected_channel:
+            self.plot_canvas.reset_channel_scale(selected_channel)
+            self._update_selection_status(selected_channel)  # Update status with new scale
+            self.status_bar.showMessage(
+                f'Reset scale for {selected_channel}', 
+                STATUS_MESSAGE_SHORT
+            )
+        else:
+            QMessageBox.information(
+                self, 'No Selection', 
+                'Please select a channel first to reset its scale.'
+            )
         
     def show_about_dialog(self) -> None:
         """Display the About dialog."""
@@ -699,6 +700,64 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         """
         
         QMessageBox.about(self, f'About {APP_NAME}', about_text)
+        
+    # ==================== Channel Selection Coordination ====================
+    
+    def _on_channel_selected_from_list(self, channel_name: str) -> None:
+        """
+        Handle channel selection from the channel list widget.
+        
+        Args:
+            channel_name: Name of the selected channel
+        """
+        # Update plot canvas selection (without triggering its signal)
+        if self.plot_canvas.get_selected_channel() != channel_name:
+            self.plot_canvas.select_channel(channel_name)
+        
+        # Update status bar to show selection and scale info
+        self._update_selection_status(channel_name)
+    
+    def _on_channel_selected_from_plot(self, channel_name: str) -> None:
+        """
+        Handle channel selection from the plot canvas.
+        
+        Args:
+            channel_name: Name of the selected channel
+        """
+        # Update channel list selection (without triggering its signal)
+        if self.channel_list.get_selected_channel() != channel_name:
+            self.channel_list.select_channel(channel_name)
+        
+        # Update status bar to show selection and scale info
+        self._update_selection_status(channel_name)
+    
+    def _clear_channel_selection(self) -> None:
+        """
+        Clear channel selection from both list and plot.
+        """
+        self.channel_list.clear_selection()
+        self.plot_canvas.clear_selection()
+        
+        # Update status bar
+        self._update_selection_status(None)
+    
+    def _update_selection_status(self, channel_name: Optional[str]) -> None:
+        """
+        Update the status bar with current selection and scale information.
+        
+        Args:
+            channel_name: Name of the selected channel, or None if no selection
+        """
+        if channel_name:
+            scale_factor = self.plot_canvas.get_channel_scale_factor(channel_name)
+            scale_text = f" (Scale: {scale_factor:.2f}x)" if scale_factor != 1.0 else ""
+            message = f"Selected: {channel_name}{scale_text} | Use mouse wheel to zoom selected channel"
+            self.status_bar.showMessage(message, 0)  # Permanent until changed
+        else:
+            # Show channel count when no selection
+            channel_count = self.plot_canvas.get_channel_count()
+            message = f"{channel_count} channel(s) loaded | Click a channel or waveform to select"
+            self.status_bar.showMessage(message, 0)
         
     # ==================== Helper Methods ====================
     

@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QLabel, QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPalette
 
 from ..utils.constants import (
     CHANNEL_ITEM_MARGINS,
@@ -46,6 +46,7 @@ class ChannelListWidget(QListWidget):
     # Signals for communication with parent components
     channel_visibility_changed = pyqtSignal(str, bool)  # channel_name, visible
     channel_removed = pyqtSignal(str)  # channel_name
+    channel_selected = pyqtSignal(str)  # channel_name
     
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         """
@@ -57,6 +58,12 @@ class ChannelListWidget(QListWidget):
         super().__init__(parent)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        
+        # Channel selection state
+        self.selected_channel: Optional[str] = None
+        
+        # Connect item clicks to selection handler
+        self.itemClicked.connect(self._on_item_clicked)
         
     def add_channel(self, channel_name: str, channel_data: 'ChannelData', 
                    visible: bool = True) -> None:
@@ -227,3 +234,112 @@ class ChannelListWidget(QListWidget):
             Number of visible channels
         """
         return len(self.get_visible_channels())
+    
+    # ==================== Channel Selection Methods ====================
+    
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        """
+        Handle item clicks for channel selection.
+        
+        Args:
+            item: The clicked list item
+        """
+        if item:
+            channel_name = item.data(Qt.ItemDataRole.UserRole)
+            self.select_channel(channel_name)
+    
+    def select_channel(self, channel_name: str) -> None:
+        """
+        Select a specific channel and update visual feedback.
+        
+        Args:
+            channel_name: Name of the channel to select
+        """
+        if self.selected_channel != channel_name:
+            # Clear previous selection visual feedback
+            self._clear_selection_visual()
+            
+            # Set new selection
+            self.selected_channel = channel_name
+            
+            # Apply visual feedback to new selection
+            self._apply_selection_visual(channel_name)
+            
+            # Emit selection signal
+            self.channel_selected.emit(channel_name)
+    
+    def get_selected_channel(self) -> Optional[str]:
+        """
+        Get the currently selected channel name.
+        
+        Returns:
+            Name of the selected channel, or None if no selection
+        """
+        return self.selected_channel
+    
+    def clear_selection(self) -> None:
+        """
+        Clear the current channel selection.
+        """
+        if self.selected_channel is not None:
+            self._clear_selection_visual()
+            self.selected_channel = None
+    
+    def _apply_selection_visual(self, channel_name: str) -> None:
+        """
+        Apply visual feedback for the selected channel.
+        
+        Args:
+            channel_name: Name of the channel to highlight
+        """
+        item = self._find_item_by_channel(channel_name)
+        if item:
+            widget = self.itemWidget(item)
+            if widget:
+                # Set bold font for the label
+                label = widget.findChild(QLabel)
+                if label:
+                    font = label.font()
+                    font.setBold(True)
+                    label.setFont(font)
+                    
+                # Set background color to indicate selection
+                widget.setStyleSheet(
+                    "QWidget { background-color: palette(highlight); }"
+                    "QLabel { color: palette(highlighted-text); }"
+                )
+    
+    def _clear_selection_visual(self) -> None:
+        """
+        Clear visual feedback from the previously selected channel.
+        """
+        if self.selected_channel:
+            item = self._find_item_by_channel(self.selected_channel)
+            if item:
+                widget = self.itemWidget(item)
+                if widget:
+                    # Reset font weight for the label
+                    label = widget.findChild(QLabel)
+                    if label:
+                        font = label.font()
+                        font.setBold(False)
+                        label.setFont(font)
+                        
+                    # Clear custom styling
+                    widget.setStyleSheet("")
+    
+    def _find_item_by_channel(self, channel_name: str) -> Optional[QListWidgetItem]:
+        """
+        Find the list item corresponding to a channel name.
+        
+        Args:
+            channel_name: Name of the channel to find
+            
+        Returns:
+            The QListWidgetItem if found, None otherwise
+        """
+        for i in range(self.count()):
+            item = self.item(i)
+            if item and item.data(Qt.ItemDataRole.UserRole) == channel_name:
+                return item
+        return None
