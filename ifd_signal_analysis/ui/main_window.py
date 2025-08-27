@@ -21,6 +21,18 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as Navigation
 
 from .plot_canvas import PlotCanvas
 from .channel_list import ChannelListWidget
+from .multi_plot_manager import MultiPlotManager
+from .data_pipeline import DataPipeline
+
+# Import processing configuration UI
+try:
+    from ...ui.processing_config_widget import ProcessingConfigDialog
+except ImportError:
+    # Fallback for relative imports
+    import sys
+    import os
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+    from ui.processing_config_widget import ProcessingConfigDialog
 from ..threads import PlottingThread, LoadWaveformThread
 from ..utils.constants import (
     APP_NAME, APP_VERSION, APP_ORGANIZATION,
@@ -80,6 +92,19 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         self.parsers: Dict[str, Any] = {}  # Store parser instances for each loaded file
         self.settings = QSettings(APP_ORGANIZATION, 'Settings')
         self.progress_dialog: Optional['LoadingProgressDialog'] = None
+        
+        # Multi-plot system
+        self.plot_manager = MultiPlotManager()
+        self.data_pipeline = DataPipeline()
+        self.use_multi_plot = True  # Flag to enable multi-plot mode
+        
+        # Connect pipeline signals
+        self.data_pipeline.connection_added.connect(self._on_pipeline_connection_added)
+        self.data_pipeline.pipeline_error.connect(self._on_pipeline_error)
+        self.data_pipeline.connection_executed.connect(self._on_pipeline_connection_executed)
+        
+        # Connect data pipeline to plot manager for data access
+        self._integrate_pipeline_with_plots()
         
         # UI setup
         self._setup_window()
@@ -242,6 +267,11 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         clear_btn.clicked.connect(self.clear_all_data)
         toolbar.addWidget(clear_btn)
         
+        # Add multi-plot management toolbar
+        if self.use_multi_plot:
+            toolbar.addSeparator()
+            self._add_multiplot_toolbar_controls(toolbar)
+        
         self.addToolBar(toolbar)
         
     def _create_status_bar(self) -> None:
@@ -335,31 +365,95 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     
         
     def _create_plot_panel(self) -> QWidget:
-        """Create the right panel containing the matplotlib plot canvas."""
+        """Create the right panel containing the plot area."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setSpacing(5)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # Create the plot canvas
-        self.plot_canvas = PlotCanvas()
-        
-        # Connect plot canvas selection signal
-        self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
-        
-        # Create navigation toolbar
-        self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
-        
-        # Add widgets to layout
-        layout.addWidget(self.nav_toolbar)
-        layout.addWidget(self.plot_canvas)
+        if self.use_multi_plot:
+            # Use multi-plot manager container
+            self.plot_container = self.plot_manager.get_container()
+            
+            # Connect multi-plot manager signals
+            self.plot_manager.plot_added.connect(self._on_plot_added)
+            self.plot_manager.plot_removed.connect(self._on_plot_removed)
+            self.plot_manager.plot_selected.connect(self._on_plot_selected)
+            
+            # Create a default first plot
+            first_plot_id = self.plot_manager.create_plot("Main Plot")
+            if first_plot_id:
+                # Get the first plot canvas for backward compatibility
+                self.plot_canvas = self.plot_manager.get_plot_canvas(first_plot_id)
+                
+                # Connect plot canvas selection signal
+                if self.plot_canvas:
+                    self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
+                
+                # Create navigation toolbar using the first plot canvas
+                self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
+            else:
+                # Fallback if plot creation fails
+                self.plot_canvas = PlotCanvas()
+                self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
+                self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
+            
+            # Add widgets to layout
+            layout.addWidget(self.nav_toolbar)
+            layout.addWidget(self.plot_container)
+            
+        else:
+            # Use single plot canvas (legacy mode)
+            self.plot_canvas = PlotCanvas()
+            self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
+            self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
+            
+            layout.addWidget(self.nav_toolbar)
+            layout.addWidget(self.plot_canvas)
         
         return panel
         
+    def _add_multiplot_toolbar_controls(self, toolbar: QToolBar) -> None:
+        """Add multi-plot management controls to the toolbar."""
+        # Add Plot button
+        self.add_plot_btn = QPushButton('📊 Add Plot')
+        self.add_plot_btn.setToolTip('Add a new plot canvas (maximum 6)')
+        self.add_plot_btn.clicked.connect(self.add_new_plot)
+        toolbar.addWidget(self.add_plot_btn)
+        
+        # Remove Plot button (will become a dropdown when we have plots)
+        self.remove_plot_btn = QPushButton('❌ Remove Plot')
+        self.remove_plot_btn.setToolTip('Remove the selected plot')
+        self.remove_plot_btn.setEnabled(False)
+        self.remove_plot_btn.clicked.connect(self.remove_current_plot)
+        toolbar.addWidget(self.remove_plot_btn)
+        
+        toolbar.addSeparator()
+        
+        # Configure Processing button
+        self.config_processing_btn = QPushButton('⚙️ Configure Processing')
+        self.config_processing_btn.setToolTip('Configure signal processing pipeline')
+        self.config_processing_btn.clicked.connect(self.configure_processing)
+        toolbar.addWidget(self.config_processing_btn)
+        
+        # View Pipeline button
+        self.view_pipeline_btn = QPushButton('🔗 View Pipeline')
+        self.view_pipeline_btn.setToolTip('View current data processing pipeline')
+        self.view_pipeline_btn.clicked.connect(self.view_pipeline)
+        self.view_pipeline_btn.setEnabled(False)  # Enable when pipelines exist
+        toolbar.addWidget(self.view_pipeline_btn)
+        
+        # Update button states based on current state
+        self._update_multiplot_button_states()
+        
     def _create_keyboard_shortcuts(self) -> None:
         """Set up keyboard shortcuts for common operations."""
-        # These are already handled in the menu actions
-        pass
+        # Add keyboard shortcuts for plot focus (Ctrl+1-6)
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        
+        for i in range(1, 7):
+            shortcut = QShortcut(QKeySequence(f'Ctrl+{i}'), self)
+            shortcut.activated.connect(lambda plot_num=i: self.focus_plot(plot_num))
         
     # ==================== Settings Management ====================
     
@@ -565,8 +659,29 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             
             # Apply batch plot data with auto-scaling if we have any plot data
             if plot_data:
-                self.plot_canvas.apply_batch_plot_data(plot_data, overlay_mode)
-                
+                if self.use_multi_plot:
+                    # In multi-plot mode, apply to the active plot or first plot if none active
+                    active_plot_id = self.plot_manager.get_active_plot_id()
+                    if active_plot_id:
+                        active_canvas = self.plot_manager.get_plot_canvas(active_plot_id)
+                        if active_canvas:
+                            active_canvas.apply_batch_plot_data(plot_data, overlay_mode)
+                            print(f"Applied plot data to active plot: {active_plot_id}")
+                        else:
+                            print(f"Warning: Could not get canvas for active plot {active_plot_id}")
+                    else:
+                        # No active plot, use the first available plot
+                        plot_ids = self.plot_manager.get_plot_ids()
+                        if plot_ids:
+                            first_plot_id = plot_ids[0]
+                            first_canvas = self.plot_manager.get_plot_canvas(first_plot_id)
+                            if first_canvas:
+                                first_canvas.apply_batch_plot_data(plot_data, overlay_mode)
+                                print(f"Applied plot data to first available plot: {first_plot_id}")
+                else:
+                    # Single plot mode - use the main plot canvas
+                    self.plot_canvas.apply_batch_plot_data(plot_data, overlay_mode)
+                    
             # Update status
             self.channel_count_label.setText(f'{total_channels} channel(s) loaded')
             self.status_bar.showMessage(
@@ -603,15 +718,35 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     
     def _on_channel_visibility_changed(self, channel_name: str, visible: bool) -> None:
         """Handle channel visibility toggle from the channel list."""
-        self.plot_canvas.set_channel_visibility(channel_name, visible)
+        if self.use_multi_plot:
+            # Apply to active plot in multi-plot mode
+            active_plot_id = self.plot_manager.get_active_plot_id()
+            if active_plot_id:
+                active_canvas = self.plot_manager.get_plot_canvas(active_plot_id)
+                if active_canvas:
+                    active_canvas.set_channel_visibility(channel_name, visible)
+        else:
+            # Single plot mode
+            self.plot_canvas.set_channel_visibility(channel_name, visible)
         
     def _on_channel_removed(self, channel_name: str) -> None:
         """Handle channel removal from the channel list."""
-        self.plot_canvas.remove_channel(channel_name)
-        
-        # Update status
-        remaining_channels = self.plot_canvas.get_channel_count()
-        self.channel_count_label.setText(f'{remaining_channels} channel(s) loaded')
+        if self.use_multi_plot:
+            # Remove from active plot in multi-plot mode
+            active_plot_id = self.plot_manager.get_active_plot_id()
+            if active_plot_id:
+                active_canvas = self.plot_manager.get_plot_canvas(active_plot_id)
+                if active_canvas:
+                    active_canvas.remove_channel(channel_name)
+                    # Update status
+                    remaining_channels = active_canvas.get_channel_count()
+                    self.channel_count_label.setText(f'{remaining_channels} channel(s) loaded in {active_plot_id}')
+        else:
+            # Single plot mode
+            self.plot_canvas.remove_channel(channel_name)
+            # Update status
+            remaining_channels = self.plot_canvas.get_channel_count()
+            self.channel_count_label.setText(f'{remaining_channels} channel(s) loaded')
         
     # ==================== User Actions ====================
     
@@ -818,6 +953,278 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
                 )
         
         self.info_text.setPlainText('\n'.join(info_lines))
+        
+    # ==================== Multi-Plot Management ====================
+    
+    def add_new_plot(self) -> None:
+        """Add a new plot canvas to the multi-plot manager."""
+        if not self.use_multi_plot:
+            return
+            
+        plot_id = self.plot_manager.create_plot()
+        if plot_id:
+            self.status_bar.showMessage(f'Added {plot_id}', STATUS_MESSAGE_SHORT)
+            self._update_multiplot_button_states()
+        else:
+            QMessageBox.information(
+                self, 'Maximum Plots Reached',
+                'Maximum of 6 plots allowed. Remove a plot first to add a new one.'
+            )
+    
+    def remove_current_plot(self) -> None:
+        """Remove the currently active plot."""
+        if not self.use_multi_plot:
+            return
+            
+        active_plot_id = self.plot_manager.get_active_plot_id()
+        if not active_plot_id:
+            QMessageBox.information(
+                self, 'No Plot Selected',
+                'No plot is currently active to remove.'
+            )
+            return
+            
+        reply = QMessageBox.question(
+            self, 'Remove Plot',
+            f'Are you sure you want to remove {active_plot_id}?\n'
+            'All data in this plot will be lost.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            if self.plot_manager.remove_plot(active_plot_id):
+                self.status_bar.showMessage(f'Removed {active_plot_id}', STATUS_MESSAGE_SHORT)
+                self._update_multiplot_button_states()
+    
+    def configure_processing(self) -> None:
+        """Open the processing configuration dialog."""
+        if not self.use_multi_plot:
+            return
+            
+        # Get available plots
+        available_plots = list(self.plot_manager.get_plot_ids())
+        
+        if len(available_plots) < 2:
+            QMessageBox.information(
+                self, 'Insufficient Plots',
+                'At least 2 plots are required for signal processing.\n'
+                'Add more plots first.'
+            )
+            return
+            
+        try:
+            dialog = ProcessingConfigDialog(available_plots, self)
+            dialog.pipeline_configured.connect(self._on_pipeline_configured)
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(
+                self, 'Configuration Error',
+                f'Failed to open processing configuration:\n{str(e)}'
+            )
+    
+    def view_pipeline(self) -> None:
+        """View the current data processing pipeline."""
+        # TODO: Implement pipeline visualization
+        # For now, show a simple message with pipeline info
+        connections = self.data_pipeline.get_all_connections()
+        
+        if not connections:
+            QMessageBox.information(
+                self, 'No Pipeline',
+                'No processing pipeline connections are currently configured.'
+            )
+            return
+            
+        pipeline_info = "Current Pipeline Connections:\n\n"
+        for conn_id, connection in connections.items():
+            pipeline_info += (
+                f"• {connection.source_plot_id} → {connection.target_plot_id}\n"
+                f"  Processor: {connection.processor_name}\n"
+                f"  Parameters: {connection.processor_parameters}\n\n"
+            )
+            
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle('Pipeline Overview')
+        msg_box.setText(pipeline_info)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.exec()
+    
+    def focus_plot(self, plot_number: int) -> None:
+        """Focus on a specific plot by number (1-6)."""
+        if not self.use_multi_plot:
+            return
+            
+        plot_id = f"Plot{plot_number}"
+        if self.plot_manager.set_active_plot(plot_id):
+            self.status_bar.showMessage(f'Focused on {plot_id}', STATUS_MESSAGE_SHORT)
+        else:
+            self.status_bar.showMessage(f'{plot_id} does not exist', STATUS_MESSAGE_SHORT)
+    
+    def _update_multiplot_button_states(self) -> None:
+        """Update the enabled/disabled state of multi-plot toolbar buttons."""
+        if not self.use_multi_plot:
+            return
+            
+        plot_count = len(self.plot_manager.get_plot_ids())
+        
+        # Update Add Plot button
+        if hasattr(self, 'add_plot_btn'):
+            self.add_plot_btn.setEnabled(plot_count < self.plot_manager.max_plots)
+            
+        # Update Remove Plot button
+        if hasattr(self, 'remove_plot_btn'):
+            self.remove_plot_btn.setEnabled(plot_count > 0)
+            
+        # Update Configure Processing button
+        if hasattr(self, 'config_processing_btn'):
+            self.config_processing_btn.setEnabled(plot_count >= 1)
+            
+        # Update View Pipeline button
+        if hasattr(self, 'view_pipeline_btn'):
+            has_connections = len(self.data_pipeline.get_all_connections()) > 0
+            self.view_pipeline_btn.setEnabled(has_connections)
+    
+    def _on_pipeline_configured(self, source_plot: str, target_plot: str, 
+                              processor_name: str, parameters: Dict[str, Any]) -> None:
+        """Handle pipeline configuration from the config dialog."""
+        try:
+            connection_id = self.data_pipeline.add_connection(
+                source_plot, target_plot, processor_name, parameters
+            )
+            
+            self.status_bar.showMessage(
+                f'Created processing connection: {source_plot} → {target_plot}',
+                STATUS_MESSAGE_MEDIUM
+            )
+            
+            # Update button states
+            self._update_multiplot_button_states()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self, 'Pipeline Configuration Error',
+                f'Failed to create processing connection:\n{str(e)}'
+            )
+    
+    def _integrate_pipeline_with_plots(self) -> None:
+        """Integrate the data pipeline with the multi-plot manager for data access."""
+        # Override the pipeline's _get_plot_data method
+        def get_plot_data_from_manager(plot_id: str):
+            canvas = self.plot_manager.get_plot_canvas(plot_id)
+            if canvas and canvas.has_data():
+                return canvas.get_plot_data()
+            return None
+        
+        # Replace the pipeline's data access method
+        self.data_pipeline._get_plot_data = get_plot_data_from_manager
+        
+    def execute_pipeline_connection(self, connection_id: str) -> None:
+        """Execute a specific pipeline connection manually."""
+        try:
+            connection = self.data_pipeline.get_connection(connection_id)
+            if not connection:
+                QMessageBox.warning(self, 'Connection Error', f'Connection {connection_id} not found')
+                return
+            
+            # Execute the connection
+            processed_data = self.data_pipeline.execute_connection(connection_id)
+            
+            # Apply processed data to target plot
+            target_canvas = self.plot_manager.get_plot_canvas(connection.target_plot_id)
+            if target_canvas and processed_data:
+                # Extract processor info for the target plot
+                processor_info = {
+                    'processor_name': connection.processor_name,
+                    'parameters': connection.processor_parameters
+                }
+                
+                target_canvas.set_processed_data(
+                    processed_data, 
+                    connection.source_plot_id, 
+                    processor_info
+                )
+                
+                # Ensure the target plot auto-fits the new data
+                target_canvas.zoom_to_fit_all_axes()
+                
+                self.status_bar.showMessage(
+                    f'Executed pipeline: {connection.source_plot_id} → {connection.target_plot_id}',
+                    STATUS_MESSAGE_MEDIUM
+                )
+            else:
+                QMessageBox.warning(self, 'Execution Error', f'Could not apply data to target plot {connection.target_plot_id}')
+                
+        except Exception as e:
+            QMessageBox.critical(
+                self, 'Pipeline Execution Error',
+                f'Failed to execute pipeline connection:\n{str(e)}'
+            )
+            
+    def _on_pipeline_connection_added(self, connection_id: str) -> None:
+        """Handle pipeline connection added signal."""
+        self._update_multiplot_button_states()
+        
+        # Automatically execute the connection when it's first created
+        self.execute_pipeline_connection(connection_id)
+    
+    def _on_pipeline_connection_executed(self, connection_id: str, execution_time: float) -> None:
+        """Handle successful pipeline connection execution."""
+        connection = self.data_pipeline.get_connection(connection_id)
+        if connection:
+            self.status_bar.showMessage(
+                f'Pipeline executed: {connection.source_plot_id} → {connection.target_plot_id} ({execution_time:.2f}s)',
+                STATUS_MESSAGE_SHORT
+            )
+    
+    def _on_pipeline_error(self, connection_id: str, error_message: str) -> None:
+        """Handle pipeline execution error."""
+        QMessageBox.warning(
+            self, 'Pipeline Error',
+            f'Pipeline execution failed:\n{error_message}'
+        )
+    
+    # ==================== Multi-Plot Signal Handlers ====================
+    
+    def _on_plot_added(self, plot_id: str, canvas: PlotCanvas) -> None:
+        """Handle plot addition signal from multi-plot manager."""
+        # Connect the new plot's signals
+        canvas.channel_selected.connect(self._on_channel_selected_from_plot)
+        
+        # Update button states
+        self._update_multiplot_button_states()
+        
+        print(f"Plot added: {plot_id}")
+    
+    def _on_plot_removed(self, plot_id: str) -> None:
+        """Handle plot removal signal from multi-plot manager."""
+        # Update button states
+        self._update_multiplot_button_states()
+        
+        # Clear any pipeline connections involving this plot
+        connections_to_remove = []
+        for conn_id, connection in self.data_pipeline.get_all_connections().items():
+            if connection.source_plot_id == plot_id or connection.target_plot_id == plot_id:
+                connections_to_remove.append(conn_id)
+        
+        for conn_id in connections_to_remove:
+            self.data_pipeline.remove_connection(conn_id)
+            
+        print(f"Plot removed: {plot_id}")
+    
+    def _on_plot_selected(self, plot_id: str) -> None:
+        """Handle plot selection signal from multi-plot manager."""
+        # Update navigation toolbar to use the selected plot's canvas
+        canvas = self.plot_manager.get_plot_canvas(plot_id)
+        if canvas and hasattr(self, 'nav_toolbar'):
+            # Update toolbar to use the new canvas
+            self.nav_toolbar.canvas = canvas
+            self.nav_toolbar.figure = canvas.figure
+            
+            # Update the current plot_canvas reference for compatibility
+            self.plot_canvas = canvas
+            
+        self.status_bar.showMessage(f'Selected {plot_id}', STATUS_MESSAGE_SHORT)
         
     # ==================== Event Handling ====================
         

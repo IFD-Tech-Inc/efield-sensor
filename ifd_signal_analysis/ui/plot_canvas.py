@@ -156,6 +156,168 @@ class PlotCanvas(FigureCanvas):
         self.axis_ranges.clear()
         
         self.draw()
+    
+    def get_plot_data(self) -> Dict[str, Any]:
+        """
+        Extract current plot data in a format suitable for signal processing.
+        
+        Returns:
+            Dictionary containing plot data with channels, header info, and metadata
+        """
+        if not self.plot_data:
+            return {
+                'channels': {},
+                'header': {},
+                'source_info': {
+                    'plot_id': getattr(self, 'plot_id', 'unknown'),
+                    'export_timestamp': self._get_current_timestamp(),
+                    'channel_count': 0
+                }
+            }
+        
+        channels_data = {}
+        
+        # Extract data from each plotted channel
+        for channel_name, channel_info in self.plot_data.items():
+            if channel_name in self.channel_visibility and self.channel_visibility[channel_name]:
+                # Get the line data
+                line = channel_info.get('line')
+                if line and hasattr(line, 'get_data'):
+                    time_data, voltage_data = line.get_data()
+                    
+                    # Convert to numpy arrays if needed
+                    if not isinstance(time_data, np.ndarray):
+                        time_data = np.array(time_data)
+                    if not isinstance(voltage_data, np.ndarray):
+                        voltage_data = np.array(voltage_data)
+                    
+                    channels_data[channel_name] = {
+                        'time_array': time_data,
+                        'voltage_data': voltage_data,
+                        'metadata': {
+                            'color': channel_info.get('color', 'blue'),
+                            'visible': self.channel_visibility[channel_name],
+                            'axis_index': self.channel_to_axis.get(channel_name, 0),
+                            'scale_factor': self.channel_scale_factors.get(channel_name, 1.0)
+                        }
+                    }
+        
+        return {
+            'channels': channels_data,
+            'header': getattr(self, '_last_header', {}),
+            'source_info': {
+                'plot_id': getattr(self, 'plot_id', 'unknown'),
+                'export_timestamp': self._get_current_timestamp(),
+                'channel_count': len(channels_data),
+                'total_channels': len(self.plot_data),
+                'visible_channels': len([c for c, v in self.channel_visibility.items() if v])
+            }
+        }
+    
+    def set_processed_data(self, processed_data: Dict[str, Any], 
+                          source_plot_id: str = None, 
+                          processor_info: Dict[str, Any] = None) -> None:
+        """
+        Display processed data from another plot.
+        
+        Args:
+            processed_data: Dictionary containing processed waveform data
+            source_plot_id: ID of the source plot that generated this data
+            processor_info: Information about the processing chain applied
+        """
+        if 'channels' not in processed_data:
+            print("Warning: No channels data in processed_data")
+            return
+        
+        channels = processed_data['channels']
+        if not channels:
+            print("Warning: No channels to display")
+            return
+        
+        # Clear existing data
+        self.clear_all_plots()
+        
+        # Store header information
+        if 'header' in processed_data:
+            self._last_header = processed_data['header']
+        
+        # Update plot title to indicate processed data
+        title_parts = []
+        if source_plot_id:
+            title_parts.append(f"From {source_plot_id}")
+        if processor_info and 'processor_name' in processor_info:
+            title_parts.append(processor_info['processor_name'])
+        
+        if title_parts:
+            plot_title = f"Processed: {' → '.join(title_parts)}"
+        else:
+            plot_title = "Processed Data"
+        
+        self.ax.set_title(plot_title)
+        
+        # Plot each channel
+        for channel_name, channel_data in channels.items():
+            if 'time_array' in channel_data and 'voltage_data' in channel_data:
+                time_array = channel_data['time_array']
+                voltage_data = channel_data['voltage_data']
+                
+                # Get metadata
+                metadata = channel_data.get('metadata', {})
+                color = metadata.get('color', self.get_next_color())
+                
+                # Calculate voltage range for axis assignment
+                voltage_range = self._calculate_channel_range(voltage_data)
+                
+                # Determine which axis this channel should use
+                target_axis, axis_index = self._get_or_create_axis_for_channel(channel_name, voltage_range)
+                
+                # Plot the data on the correct axis
+                line, = target_axis.plot(
+                    time_array, voltage_data, 
+                    color=color, 
+                    linewidth=PLOT_LINE_WIDTH,
+                    alpha=PLOT_LINE_ALPHA,
+                    picker=True,
+                    pickradius=5,
+                    label=channel_name
+                )
+                
+                # Store plot information
+                self.plot_data[channel_name] = {
+                    'line': line,
+                    'color': color,
+                    'time_array': time_array,
+                    'voltage_data': voltage_data,
+                    'voltage_range': voltage_range,
+                    'axis_index': axis_index
+                }
+                
+                # Set channel visibility
+                self.channel_visibility[channel_name] = metadata.get('visible', True)
+                
+                # Store original data and scale factor
+                self.original_data[channel_name] = voltage_data.copy()
+                self.channel_scale_factors[channel_name] = metadata.get('scale_factor', 1.0)
+                
+                # Assign to the determined axis
+                self.channel_to_axis[channel_name] = axis_index
+        
+        # Recalculate and apply engineering scaling
+        self._recalculate_axis_ranges()
+        self._apply_engineering_scaling_to_all_axes()
+        
+        # Update plot appearance
+        self.update_plot_appearance()
+        
+        # Refresh the canvas
+        self.draw()
+        
+        print(f"Set processed data: {len(channels)} channels from {source_plot_id or 'unknown plot'}")
+    
+    def _get_current_timestamp(self) -> str:
+        """Get current timestamp in ISO format."""
+        import datetime
+        return datetime.datetime.now().isoformat()
         
     def get_next_color(self) -> str:
         """
@@ -1304,7 +1466,7 @@ class PlotCanvas(FigureCanvas):
         This method recalculates the optimal ranges for all axes based on currently
         visible channels and applies engineering scaling to each axis independently.
         """
-        print("Zoom to fit all axes")
+        print("Zoom to fit all axes - called from auto-range for processed data")
         
         if not self.plot_data:
             print("No plot data available for zoom to fit")
