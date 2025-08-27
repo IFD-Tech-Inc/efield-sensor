@@ -766,6 +766,36 @@ class PlotCanvas(FigureCanvas):
             name for name, visible in self.channel_visibility.items() 
             if visible
         ]
+        
+    def get_all_channel_names(self) -> List[str]:
+        """
+        Get list of all channel names (both visible and hidden).
+        
+        Returns:
+            List of all channel names in the plot
+        """
+        return list(self.plot_data.keys())
+        
+    def get_channel_visibility_state(self, channel_name: str) -> bool:
+        """
+        Get the visibility state of a specific channel.
+        
+        Args:
+            channel_name: Name of the channel to check
+            
+        Returns:
+            True if the channel is visible, False otherwise
+        """
+        return self.channel_visibility.get(channel_name, False)
+        
+    def get_all_channels_visibility(self) -> Dict[str, bool]:
+        """
+        Get visibility states for all channels.
+        
+        Returns:
+            Dictionary mapping channel names to their visibility states
+        """
+        return self.channel_visibility.copy()
     
     def get_channel_count(self) -> int:
         """

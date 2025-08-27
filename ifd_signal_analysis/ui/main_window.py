@@ -1219,12 +1219,101 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         if canvas and hasattr(self, 'nav_toolbar'):
             # Update toolbar to use the new canvas
             self.nav_toolbar.canvas = canvas
-            self.nav_toolbar.figure = canvas.figure
+            self.nav_toolbar.figure = canvas.fig
             
             # Update the current plot_canvas reference for compatibility
             self.plot_canvas = canvas
             
+            # Update the channel list to show channels from the newly selected plot
+            self._update_channel_list_from_active_plot(canvas)
+            
         self.status_bar.showMessage(f'Selected {plot_id}', STATUS_MESSAGE_SHORT)
+        
+    def _update_channel_list_from_active_plot(self, canvas: PlotCanvas) -> None:
+        """
+        Update the channel list to reflect channels in the active plot canvas.
+        
+        This method synchronizes the channel list UI with the channels available
+        in the currently selected plot, preserving visibility states.
+        
+        Args:
+            canvas: The PlotCanvas of the newly active plot
+        """
+        if not canvas:
+            return
+            
+        # Clear the current channel list
+        self.channel_list.clear_all_channels()
+        
+        # Get all channels from the active plot
+        channel_names = canvas.get_all_channel_names()
+        
+        if not channel_names:
+            # No channels in this plot
+            self.channel_count_label.setText(f'No data in {getattr(canvas, "plot_id", "active plot")}')
+            return
+        
+        # Add channels to the list with their current visibility states
+        for channel_name in sorted(channel_names):
+            visible = canvas.get_channel_visibility_state(channel_name)
+            
+            # We need to create a mock ChannelData object for the UI
+            # since we don't have access to the original ChannelData objects
+            # Create a minimal mock object that provides the required interface
+            mock_channel_data = self._create_mock_channel_data(channel_name, canvas)
+            
+            # Add to channel list with current visibility state
+            self.channel_list.add_channel(channel_name, mock_channel_data, visible=visible)
+        
+        # Update status to show channel count for this plot
+        plot_id = getattr(canvas, 'plot_id', 'active plot')
+        visible_count = len(canvas.get_visible_channels())
+        total_count = len(channel_names)
+        self.channel_count_label.setText(
+            f'{plot_id}: {visible_count}/{total_count} channels visible'
+        )
+        
+        print(f"Updated channel list for {plot_id}: {len(channel_names)} channels")
+        
+    def _create_mock_channel_data(self, channel_name: str, canvas: PlotCanvas) -> object:
+        """
+        Create a mock ChannelData object for UI purposes.
+        
+        Args:
+            channel_name: Name of the channel
+            canvas: PlotCanvas containing the channel data
+            
+        Returns:
+            Mock object with minimal ChannelData interface
+        """
+        class MockChannelData:
+            def __init__(self, name: str, canvas: PlotCanvas):
+                self.name = name
+                self.enabled = True
+                
+                # Try to get voltage data for sample count
+                if name in canvas.plot_data:
+                    plot_info = canvas.plot_data[name]
+                    if 'voltage_data' in plot_info:
+                        self.voltage_data = plot_info['voltage_data']
+                    elif hasattr(plot_info.get('line'), 'get_ydata'):
+                        self.voltage_data = plot_info['line'].get_ydata()
+                    else:
+                        self.voltage_data = [0]  # Fallback
+                else:
+                    self.voltage_data = [0]  # Fallback
+                    
+                # Create a mock volt_div_val for display purposes
+                self.volt_div_val = MockVoltDivVal()
+                
+        class MockVoltDivVal:
+            def get_scaled_value(self):
+                return 1.0  # Default value for display
+                
+            def get_unit_string(self):
+                return 'V'  # Default unit
+                
+        return MockChannelData(channel_name, canvas)
         
     # ==================== Event Handling ====================
         
