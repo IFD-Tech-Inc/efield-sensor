@@ -63,6 +63,146 @@ except ImportError as e:
     print(f"Warning: Progress dialog not available: {e}")
 
 
+
+
+class PlottingThread(QThread):
+    """
+    Background thread for plotting waveform data to prevent GUI freezing during rendering.
+    Handles matplotlib operations off the main UI thread.
+    """
+    progress = pyqtSignal(str)  # Status message
+    progress_percentage = pyqtSignal(int, str)  # Progress percentage and message
+    channel_plotted = pyqtSignal(str, dict)  # channel_name, plot_data_dict
+    finished = pyqtSignal(dict)  # Final plotting results
+    error = pyqtSignal(str)  # Error message
+    
+    def __init__(self, channels_data: dict, parser_header, overlay_mode: bool = True):
+        super().__init__()
+        self.channels_data = channels_data
+        self.parser_header = parser_header
+        self.overlay_mode = overlay_mode
+        self._cancelled = False
+        
+        # Color management for consistent coloring
+        from matplotlib.colors import TABLEAU_COLORS
+        self.colors = list(TABLEAU_COLORS.keys())
+        self.color_index = 0
+        
+    def cancel(self):
+        """Cancel the plotting operation."""
+        self._cancelled = True
+        
+    def is_cancelled(self):
+        """Check if the operation was cancelled."""
+        return self._cancelled
+        
+    def get_next_color(self):
+        """Get the next color in the cycle."""
+        color = self.colors[self.color_index % len(self.colors)]
+        self.color_index += 1
+        return color
+        
+    def run(self):
+        """Execute the plotting preparation in the background."""
+        try:
+            if not self.channels_data:
+                self.error.emit("No channel data provided for plotting")
+                return
+                
+            # Filter enabled channels with data
+            enabled_channels = {
+                name: data for name, data in self.channels_data.items()
+                if data.enabled and len(data.voltage_data) > 0
+            }
+            
+            if not enabled_channels:
+                self.error.emit("No enabled channels with valid data found")
+                return
+                
+            total_channels = len(enabled_channels)
+            processed_channels = 0
+            plot_results = {}
+            
+            self.progress_percentage.emit(5, "Preparing plot data...")
+            self.progress.emit("Starting plot data preparation...")
+            
+            # Process each channel
+            for channel_name, channel_data in enabled_channels.items():
+                if self._cancelled:
+                    return
+                    
+                processed_channels += 1
+                progress = int((processed_channels / total_channels) * 85) + 10  # 10-95%
+                
+                self.progress_percentage.emit(
+                    progress, 
+                    f"Processing channel {channel_name} ({processed_channels}/{total_channels})..."
+                )
+                self.progress.emit(f"Processing channel {channel_name}...")
+                
+                # Prepare plot data for this channel
+                try:
+                    plot_data = self.prepare_channel_plot_data(channel_name, channel_data)
+                    if plot_data:
+                        plot_results[channel_name] = plot_data
+                        
+                        # Emit individual channel completion
+                        self.channel_plotted.emit(channel_name, plot_data)
+                        
+                except Exception as e:
+                    print(f"Warning: Failed to process channel {channel_name}: {e}")
+                    continue
+                    
+            if self._cancelled:
+                return
+                
+            # Finalize
+            self.progress_percentage.emit(95, "Finalizing plot data...")
+            result = {
+                'plot_data': plot_results,
+                'total_channels': len(plot_results),
+                'overlay_mode': self.overlay_mode
+            }
+            
+            self.progress_percentage.emit(100, "Plot data preparation completed")
+            self.finished.emit(result)
+            
+        except Exception as e:
+            error_msg = f"Failed to prepare plot data: {str(e)}\n{traceback.format_exc()}"
+            self.error.emit(error_msg)
+            
+    def prepare_channel_plot_data(self, channel_name: str, channel_data) -> dict:
+        """Prepare plot data for a single channel without actual rendering."""
+        if len(channel_data.voltage_data) == 0:
+            return None
+            
+        # Calculate time array - this is often the expensive operation
+        time_array = channel_data.get_time_array(
+            self.parser_header.time_div,
+            self.parser_header.time_delay, 
+            self.parser_header.sample_rate,
+            self.parser_header.hori_div_num
+        )
+        
+        if len(time_array) == 0:
+            return None
+            
+        # Get color for this channel
+        color = self.get_next_color()
+        
+        # Prepare all data needed for plotting
+        plot_data = {
+            'channel_name': channel_name,
+            'time_array': time_array,
+            'voltage_data': channel_data.voltage_data,
+            'color': color,
+            'visible': True,
+            'channel_data': channel_data  # Keep reference for info display
+        }
+        
+        return plot_data
+
+
 class LoadWaveformThread(QThread):
     """
     Background thread for loading waveform data to prevent GUI freezing.
@@ -138,7 +278,7 @@ class LoadWaveformThread(QThread):
 class PlotCanvas(FigureCanvas):
     """
     Matplotlib canvas widget integrated with PyQt6.
-    Handles all waveform plotting and visualization.
+    Handles all waveform plotting and visualization with thread-safe operations.
     """
     
     def __init__(self, parent=None):
@@ -162,6 +302,14 @@ class PlotCanvas(FigureCanvas):
         # Store plot data for management
         self.plot_data = {}  # Store channel name -> plot line mapping
         self.channel_visibility = {}  # Store channel visibility state
+        
+        # Pending updates queue for batch rendering
+        self.pending_updates = []
+        self.batch_update_pending = False
+        
+        # Thread safety for plot operations
+        from PyQt6.QtCore import QMutex
+        self.plot_mutex = QMutex()
         
         self.draw()
         
@@ -277,6 +425,153 @@ class PlotCanvas(FigureCanvas):
                 self.ax.legend().set_visible(False)
                 
             self.draw()
+    
+    def apply_plot_data(self, plot_data: dict, overlay_mode: bool = True):
+        """
+        Apply pre-calculated plot data to the canvas. This method runs on the UI thread.
+        
+        Args:
+            plot_data: Dictionary containing prepared plot data from PlottingThread
+            overlay_mode: Whether to overlay channels or create subplots
+        """
+        self.plot_mutex.lock()
+        try:
+            channel_name = plot_data['channel_name']
+            time_array = plot_data['time_array']
+            voltage_data = plot_data['voltage_data']
+            color = plot_data['color']
+            visible = plot_data['visible']
+            
+            # Plot the waveform
+            if overlay_mode:
+                line, = self.ax.plot(time_array, voltage_data, 
+                                   label=channel_name, color=color, 
+                                   linewidth=1.0, alpha=0.8)
+                line.set_visible(visible)
+            else:
+                # TODO: Implement subplot mode for separate channel display
+                # For now, fall back to overlay mode
+                line, = self.ax.plot(time_array, voltage_data, 
+                                   label=channel_name, color=color,
+                                   linewidth=1.0, alpha=0.8)
+                line.set_visible(visible)
+                
+            # Store the plot line for visibility management
+            self.plot_data[channel_name] = {
+                'line': line,
+                'data': plot_data['channel_data'],
+                'time': time_array,
+                'color': color
+            }
+            self.channel_visibility[channel_name] = visible
+            
+            # Queue UI update instead of immediate draw
+            self.queue_ui_update()
+            
+        except Exception as e:
+            print(f"Error applying plot data for {plot_data.get('channel_name', 'unknown')}: {e}")
+        finally:
+            self.plot_mutex.unlock()
+    
+    def apply_batch_plot_data(self, plot_results: dict, overlay_mode: bool = True):
+        """
+        Apply multiple plot data entries in a batch to improve performance.
+        
+        Args:
+            plot_results: Dictionary of channel_name -> plot_data mappings
+            overlay_mode: Whether to overlay channels or create subplots
+        """
+        self.plot_mutex.lock()
+        try:
+            # Process all channels without drawing
+            for channel_name, plot_data in plot_results.items():
+                time_array = plot_data['time_array']
+                voltage_data = plot_data['voltage_data']
+                color = plot_data['color']
+                visible = plot_data['visible']
+                
+                # Plot the waveform
+                if overlay_mode:
+                    line, = self.ax.plot(time_array, voltage_data, 
+                                       label=channel_name, color=color, 
+                                       linewidth=1.0, alpha=0.8)
+                    line.set_visible(visible)
+                else:
+                    # TODO: Implement subplot mode for separate channel display
+                    # For now, fall back to overlay mode
+                    line, = self.ax.plot(time_array, voltage_data, 
+                                       label=channel_name, color=color,
+                                       linewidth=1.0, alpha=0.8)
+                    line.set_visible(visible)
+                    
+                # Store the plot line for visibility management
+                self.plot_data[channel_name] = {
+                    'line': line,
+                    'data': plot_data['channel_data'],
+                    'time': time_array,
+                    'color': color
+                }
+                self.channel_visibility[channel_name] = visible
+            
+            # Update plot appearance once for all channels
+            self.update_plot_appearance()
+            
+        except Exception as e:
+            print(f"Error applying batch plot data: {e}")
+        finally:
+            self.plot_mutex.unlock()
+    
+    def queue_ui_update(self):
+        """
+        Queue a UI update to be processed on the next event loop iteration.
+        This prevents blocking the UI thread with immediate drawing.
+        """
+        if not self.batch_update_pending:
+            self.batch_update_pending = True
+            # Use QTimer.singleShot to defer the update to the next event loop iteration
+            QTimer.singleShot(0, self.process_pending_updates)
+    
+    def process_pending_updates(self):
+        """
+        Process any pending UI updates and redraw the canvas.
+        """
+        self.batch_update_pending = False
+        self.update_plot_appearance()
+    
+    def update_plot_appearance(self):
+        """
+        Update the overall plot appearance (legend, title, scaling) and redraw.
+        """
+        # Update plot appearance
+        self.ax.set_xlabel('Time (s)')
+        self.ax.set_ylabel('Voltage (V)')
+        self.ax.grid(True, alpha=0.3)
+        
+        # Update legend to only show visible channels
+        handles = []
+        labels = []
+        for ch_name, plot_info in self.plot_data.items():
+            if self.channel_visibility.get(ch_name, False):
+                handles.append(plot_info['line'])
+                labels.append(ch_name)
+        
+        if handles:
+            # Use 'upper right' instead of 'best' for better performance with large datasets
+            self.ax.legend(handles, labels, loc='upper right')
+        else:
+            if self.ax.get_legend():
+                self.ax.get_legend().set_visible(False)
+        
+        # Auto-scale the view
+        self.ax.relim()
+        self.ax.autoscale()
+        
+        # Update title with channel info
+        num_visible = sum(self.channel_visibility.values())
+        self.ax.set_title(f'IFD Signal Analysis - {num_visible} channel(s) displayed')
+        
+        # Finally, redraw the canvas
+        self.draw()
             
     def remove_channel(self, channel_name: str):
         """Remove a channel from the plot entirely."""
@@ -751,7 +1046,7 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     def on_load_finished(self, result: dict):
         """Handle successful completion of waveform data loading."""
         try:
-            # Close progress dialog if it exists
+            # Close loading progress dialog if it exists
             if self.progress_dialog:
                 self.progress_dialog.finish_loading("Loading completed successfully")
                 self.progress_dialog = None
@@ -770,30 +1065,17 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             self.loaded_data[file_key] = channels
             self.parsers[file_key] = parser
             
-            # Add channels to the UI
-            overlay_mode = self.overlay_radio.isChecked()
-            
+            # Add channels to the channel list (UI only)
             for channel_name, channel_data in channels.items():
                 if channel_data.enabled and len(channel_data.voltage_data) > 0:
                     # Add to channel list
                     self.channel_list.add_channel(channel_name, channel_data, visible=True)
-                    
-                    # Plot the channel
-                    self.plot_canvas.plot_channel(
-                        channel_name, 
-                        channel_data, 
-                        parser.header, 
-                        overlay_mode=overlay_mode,
-                        visible=True
-                    )
             
             # Update file info display
             self.update_file_info(parser, source_path, channels)
             
-            # Update status
-            enabled_channels = [name for name, data in channels.items() if data.enabled]
-            self.channel_count_label.setText(f'{len(enabled_channels)} channel(s) loaded')
-            self.status_bar.showMessage(f'Successfully loaded {len(enabled_channels)} channel(s) from {Path(source_path).name}', 5000)
+            # Start background plotting instead of direct plotting
+            self.start_plotting(channels, parser)
             
         except Exception as e:
             self.on_load_error(f"Error processing loaded data: {str(e)}\n{traceback.format_exc()}")
@@ -806,6 +1088,95 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             self.progress_dialog = None
             
         QMessageBox.critical(self, 'Load Error', f'Failed to load waveform data:\n\n{error_message}')
+        self.status_bar.showMessage('Ready', 5000)
+    
+    def start_plotting(self, channels: dict, parser):
+        """Start background plotting of channels using PlottingThread."""
+        self.status_bar.showMessage('Preparing plots...', 0)
+        
+        # Create progress dialog for plotting if available
+        if PROGRESS_DIALOG_AVAILABLE:
+            self.progress_dialog = LoadingProgressDialog(self)
+            self.progress_dialog.setWindowTitle("Rendering Plots")
+            self.progress_dialog.start_loading("Rendering waveform plots")
+        
+        # Get overlay mode
+        overlay_mode = self.overlay_radio.isChecked()
+        
+        # Create and start the plotting thread
+        self.plot_thread = PlottingThread(channels, parser.header, overlay_mode)
+        self.plot_thread.progress.connect(self.on_plot_progress)
+        self.plot_thread.progress_percentage.connect(self.on_plot_progress_percentage)
+        self.plot_thread.channel_plotted.connect(self.on_channel_plotted)
+        self.plot_thread.finished.connect(self.on_plotting_finished)
+        self.plot_thread.error.connect(self.on_plotting_error)
+        
+        # Connect progress dialog cancellation if available
+        if self.progress_dialog:
+            self.progress_dialog.cancelled.connect(self.on_plotting_cancelled)
+            
+        self.plot_thread.start()
+    
+    def on_plot_progress(self, message: str):
+        """Handle progress updates from the plotting thread."""
+        self.status_bar.showMessage(message, 0)
+        
+    def on_plot_progress_percentage(self, percentage: int, message: str):
+        """Handle progress percentage updates from the plotting thread."""
+        if self.progress_dialog and not self.progress_dialog.is_cancelled():
+            if not self.progress_dialog.update_progress(percentage, message):
+                # User cancelled, terminate the thread
+                if hasattr(self, 'plot_thread') and self.plot_thread.isRunning():
+                    self.plot_thread.cancel()
+                    self.plot_thread.wait()
+    
+    def on_channel_plotted(self, channel_name: str, plot_data: dict):
+        """Handle individual channel plot completion (progressive rendering)."""
+        # Apply the plot data to the canvas immediately for progressive display
+        overlay_mode = self.overlay_radio.isChecked()
+        self.plot_canvas.apply_plot_data(plot_data, overlay_mode)
+    
+    def on_plotting_finished(self, result: dict):
+        """Handle successful completion of plotting."""
+        try:
+            # Close plotting progress dialog if it exists
+            if self.progress_dialog:
+                self.progress_dialog.finish_loading("Rendering completed successfully")
+                self.progress_dialog = None
+                
+            plot_data = result['plot_data']
+            total_channels = result['total_channels']
+            overlay_mode = result['overlay_mode']
+            
+            # Apply any remaining plot data in batch (this is mainly for safety)
+            if plot_data:
+                # Most plots should already be applied via progressive rendering,
+                # but we can do a final batch update if needed
+                pass
+                
+            # Update status
+            self.channel_count_label.setText(f'{total_channels} channel(s) loaded')
+            source_info = "data" # We could store source path if needed
+            self.status_bar.showMessage(f'Successfully plotted {total_channels} channel(s)', 5000)
+            
+        except Exception as e:
+            self.on_plotting_error(f"Error finalizing plots: {str(e)}\n{traceback.format_exc()}")
+    
+    def on_plotting_cancelled(self):
+        """Handle cancellation of the plotting operation."""
+        if hasattr(self, 'plot_thread') and self.plot_thread.isRunning():
+            self.plot_thread.cancel()
+            self.plot_thread.wait()
+        self.status_bar.showMessage('Plotting cancelled by user', 3000)
+        
+    def on_plotting_error(self, error_message: str):
+        """Handle errors during plotting."""
+        # Close progress dialog if it exists
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+            
+        QMessageBox.critical(self, 'Plotting Error', f'Failed to render plots:\n\n{error_message}')
         self.status_bar.showMessage('Ready', 5000)
         
     def update_file_info(self, parser, source_path: str, channels: Dict[str, ChannelData]):
