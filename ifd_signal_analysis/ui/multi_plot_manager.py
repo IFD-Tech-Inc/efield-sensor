@@ -33,12 +33,13 @@ class PlotLayoutMode(Enum):
 class PlotInfo:
     """Information container for a managed plot."""
     
-    def __init__(self, plot_id: str, canvas: PlotCanvas, title: str = ""):
+    def __init__(self, plot_id: str, canvas: PlotCanvas, title: str = "", toolbar: Optional[Any] = None):
         self.plot_id = plot_id
         self.canvas = canvas
         self.title = title or f"Plot {plot_id}"
         self.is_active = True
         self.created_timestamp = uuid.uuid4().hex  # For ordering
+        self.toolbar = toolbar  # NavigationToolbar2QT instance for this plot
         
     def __str__(self) -> str:
         return f"PlotInfo({self.plot_id}, {self.title})"
@@ -219,6 +220,36 @@ class MultiPlotManager(QObject):
         """
         plot_info = self.plots.get(plot_id)
         return plot_info.canvas if plot_info else None
+        
+    def get_plot_toolbar(self, plot_id: str) -> Optional[Any]:
+        """
+        Get the NavigationToolbar instance for a specific plot ID.
+        
+        Args:
+            plot_id: ID of the plot
+            
+        Returns:
+            NavigationToolbar instance or None if not found
+        """
+        plot_info = self.plots.get(plot_id)
+        return plot_info.toolbar if plot_info else None
+        
+    def set_plot_toolbar(self, plot_id: str, toolbar: Any) -> bool:
+        """
+        Set the NavigationToolbar instance for a specific plot ID.
+        
+        Args:
+            plot_id: ID of the plot
+            toolbar: NavigationToolbar instance
+            
+        Returns:
+            True if successful, False if plot not found
+        """
+        plot_info = self.plots.get(plot_id)
+        if plot_info:
+            plot_info.toolbar = toolbar
+            return True
+        return False
         
     def get_plot_ids(self) -> List[str]:
         """

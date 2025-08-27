@@ -13,7 +13,7 @@ from typing import Dict, Optional, Any
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QFileDialog, QMessageBox, QStatusBar, QToolBar, QPushButton,
-    QGroupBox, QLabel, QRadioButton, QTextEdit
+    QGroupBox, QLabel, QRadioButton, QTextEdit, QStackedWidget
 )
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QAction, QFont
@@ -365,15 +365,19 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     
         
     def _create_plot_panel(self) -> QWidget:
-        """Create the right panel containing the plot area."""
+        """Create the right panel containing the plot area with proper toolbar management."""
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setSpacing(5)
+        layout.setSpacing(0)  # Eliminate spacing between toolbar and plot
         layout.setContentsMargins(0, 0, 0, 0)
         
         if self.use_multi_plot:
             # Use multi-plot manager container
             self.plot_container = self.plot_manager.get_container()
+            
+            # Create toolbar container for switching between plot toolbars
+            self.toolbar_stack = QStackedWidget()
+            self._optimize_toolbar_stack_layout(self.toolbar_stack)
             
             # Connect multi-plot manager signals
             self.plot_manager.plot_added.connect(self._on_plot_added)
@@ -389,17 +393,11 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
                 # Connect plot canvas selection signal
                 if self.plot_canvas:
                     self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
-                
-                # Create navigation toolbar using the first plot canvas
-                self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
-            else:
-                # Fallback if plot creation fails
-                self.plot_canvas = PlotCanvas()
-                self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
-                self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
-            
-            # Add widgets to layout
-            layout.addWidget(self.nav_toolbar)
+                    # Set up the toolbar connection
+                    self._create_toolbar_for_plot(first_plot_id, self.plot_canvas)
+                    
+            # Add widgets to layout with no spacing
+            layout.addWidget(self.toolbar_stack)
             layout.addWidget(self.plot_container)
             
         else:
@@ -408,10 +406,162 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             self.plot_canvas.channel_selected.connect(self._on_channel_selected_from_plot)
             self.nav_toolbar = NavigationToolbar(self.plot_canvas, panel)
             
+            # Optimize toolbar layout for compact display
+            self._optimize_toolbar_layout(self.nav_toolbar)
+            
+            # Establish proper toolbar connection
+            self.plot_canvas.set_toolbar(self.nav_toolbar)
+            
             layout.addWidget(self.nav_toolbar)
             layout.addWidget(self.plot_canvas)
         
         return panel
+        
+    def _create_toolbar_for_plot(self, plot_id: str, canvas: PlotCanvas) -> NavigationToolbar:
+        """
+        Create and register a NavigationToolbar for a specific plot.
+        
+        Args:
+            plot_id: ID of the plot
+            canvas: PlotCanvas instance for this plot
+            
+        Returns:
+            NavigationToolbar instance
+        """
+        # Create navigation toolbar for this specific plot
+        toolbar = NavigationToolbar(canvas, self.toolbar_stack)
+        
+        # Optimize toolbar layout for compact display
+        self._optimize_toolbar_layout(toolbar)
+        
+        # Establish proper bidirectional connection
+        canvas.set_toolbar(toolbar)
+        
+        # Register the toolbar with the plot manager
+        self.plot_manager.set_plot_toolbar(plot_id, toolbar)
+        
+        # Add the toolbar to the stacked widget
+        self.toolbar_stack.addWidget(toolbar)
+        
+        # If this is the first toolbar, make it active
+        if self.toolbar_stack.count() == 1:
+            self.toolbar_stack.setCurrentWidget(toolbar)
+            
+        print(f"Created and registered toolbar for {plot_id}")
+        return toolbar
+        
+    def _optimize_toolbar_layout(self, toolbar: NavigationToolbar) -> None:
+        """
+        Optimize the toolbar layout for a more compact, icon-only display.
+        
+        Args:
+            toolbar: NavigationToolbar to optimize
+        """
+        try:
+            # Set compact icon size (smaller than default)
+            toolbar.setIconSize(toolbar.iconSize() * 0.8)  # Reduce icon size by 20%
+            
+            # Set fixed height to prevent excessive vertical space
+            toolbar.setFixedHeight(32)  # Compact height
+            
+            # Remove margins and set minimal spacing
+            toolbar.setContentsMargins(2, 2, 2, 2)
+            
+            # Try to access the toolbar's layout to minimize spacing
+            layout = toolbar.layout()
+            if layout:
+                layout.setSpacing(2)  # Minimal spacing between items
+                
+            # Set style to make toolbar more compact
+            toolbar.setStyleSheet("""
+                NavigationToolbar2QT {
+                    spacing: 2px;
+                    padding: 2px;
+                    border: none;
+                }
+                NavigationToolbar2QT QToolButton {
+                    margin: 1px;
+                    padding: 2px;
+                    border: 1px solid transparent;
+                }
+                NavigationToolbar2QT QToolButton:hover {
+                    border: 1px solid #999;
+                    background-color: #f0f0f0;
+                }
+            """)
+            
+            print(f"Optimized toolbar layout: height={toolbar.height()}, icon_size={toolbar.iconSize()}")
+            
+        except Exception as e:
+            print(f"Warning: Could not fully optimize toolbar layout: {e}")
+        
+    def _optimize_toolbar_stack_layout(self, toolbar_stack: QStackedWidget) -> None:
+        """
+        Optimize the toolbar stack layout to minimize spacing and padding.
+        
+        Args:
+            toolbar_stack: QStackedWidget containing the toolbar instances
+        """
+        try:
+            # Set minimal content margins for the stack widget
+            toolbar_stack.setContentsMargins(0, 0, 0, 0)
+            
+            # Apply stylesheet to eliminate any additional spacing
+            toolbar_stack.setStyleSheet("""
+                QStackedWidget {
+                    margin: 0px;
+                    padding: 0px;
+                    border: none;
+                }
+            """)
+            
+            print(f"Optimized toolbar stack layout with minimal margins")
+            
+        except Exception as e:
+            print(f"Warning: Could not fully optimize toolbar stack layout: {e}")
+        
+    def _switch_to_plot_toolbar(self, plot_id: str) -> None:
+        """
+        Switch the toolbar stack to show the toolbar for the specified plot.
+        
+        Args:
+            plot_id: ID of the plot to switch to
+        """
+        try:
+            toolbar = self.plot_manager.get_plot_toolbar(plot_id)
+            if toolbar and hasattr(self, 'toolbar_stack'):
+                self.toolbar_stack.setCurrentWidget(toolbar)
+                print(f"Switched to toolbar for {plot_id}")
+            else:
+                print(f"Warning: Could not find toolbar for {plot_id}")
+        except Exception as e:
+            print(f"Error switching toolbar for {plot_id}: {e}")
+            
+    def _remove_plot_toolbar(self, plot_id: str) -> None:
+        """
+        Remove and cleanup the toolbar for a specific plot.
+        
+        Args:
+            plot_id: ID of the plot whose toolbar should be removed
+        """
+        try:
+            toolbar = self.plot_manager.get_plot_toolbar(plot_id)
+            if toolbar and hasattr(self, 'toolbar_stack'):
+                # Remove from stack
+                self.toolbar_stack.removeWidget(toolbar)
+                
+                # Delete the toolbar
+                toolbar.setParent(None)
+                toolbar.deleteLater()
+                
+                print(f"Removed toolbar for {plot_id}")
+                
+                # If there are remaining toolbars, show the first one
+                if self.toolbar_stack.count() > 0:
+                    self.toolbar_stack.setCurrentIndex(0)
+                    
+        except Exception as e:
+            print(f"Error removing toolbar for {plot_id}: {e}")
         
     def _add_multiplot_toolbar_controls(self, toolbar: QToolBar) -> None:
         """Add multi-plot management controls to the toolbar."""
@@ -1191,6 +1341,10 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         # Connect the new plot's signals
         canvas.channel_selected.connect(self._on_channel_selected_from_plot)
         
+        # Create and register a toolbar for the new plot
+        if hasattr(self, 'toolbar_stack'):
+            self._create_toolbar_for_plot(plot_id, canvas)
+        
         # Update button states
         self._update_multiplot_button_states()
         
@@ -1198,6 +1352,10 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     
     def _on_plot_removed(self, plot_id: str) -> None:
         """Handle plot removal signal from multi-plot manager."""
+        # Remove and cleanup the toolbar for this plot
+        if hasattr(self, 'toolbar_stack'):
+            self._remove_plot_toolbar(plot_id)
+        
         # Update button states
         self._update_multiplot_button_states()
         
@@ -1214,14 +1372,12 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
     
     def _on_plot_selected(self, plot_id: str) -> None:
         """Handle plot selection signal from multi-plot manager."""
-        # Update navigation toolbar to use the selected plot's canvas
+        # Switch to the toolbar for the selected plot
+        self._switch_to_plot_toolbar(plot_id)
+        
+        # Update the current plot_canvas reference for compatibility
         canvas = self.plot_manager.get_plot_canvas(plot_id)
-        if canvas and hasattr(self, 'nav_toolbar'):
-            # Update toolbar to use the new canvas
-            self.nav_toolbar.canvas = canvas
-            self.nav_toolbar.figure = canvas.fig
-            
-            # Update the current plot_canvas reference for compatibility
+        if canvas:
             self.plot_canvas = canvas
             
             # Update the channel list to show channels from the newly selected plot

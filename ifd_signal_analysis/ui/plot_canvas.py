@@ -80,6 +80,10 @@ class PlotCanvas(FigureCanvas):
         # Create matplotlib figure
         self.fig = Figure(figsize=DEFAULT_PLOT_FIGURE_SIZE, dpi=DEFAULT_PLOT_DPI)
         self.fig.patch.set_facecolor('white')
+        
+        # Optimize figure layout to minimize white space
+        self._optimize_figure_layout()
+        
         super().__init__(self.fig)
         self.setParent(parent)
         
@@ -121,8 +125,51 @@ class PlotCanvas(FigureCanvas):
         # Flag to prevent scroll-triggered picks
         self.scroll_in_progress = False
         
+        # Toolbar reference for proper matplotlib integration
+        self.toolbar = None
+        
         self.draw()
     
+    def set_toolbar(self, toolbar: Any) -> None:
+        """
+        Set the NavigationToolbar for this canvas and establish proper bidirectional connection.
+        
+        Args:
+            toolbar: NavigationToolbar2QT instance to associate with this canvas
+        """
+        self.toolbar = toolbar
+        if toolbar is not None:
+            # Ensure the toolbar points back to this canvas
+            toolbar.canvas = self
+            toolbar.figure = self.fig
+            # Update the toolbar's internal state
+            if hasattr(toolbar, '_init_toolbar'):
+                try:
+                    toolbar._init_toolbar()
+                except Exception as e:
+                    print(f"Warning: Could not reinitialize toolbar: {e}")
+            print(f"Set toolbar for canvas {getattr(self, 'plot_id', 'unknown')}: {toolbar}")
+    
+    def _optimize_figure_layout(self) -> None:
+        """
+        Optimize the matplotlib figure layout to minimize white space around plots.
+        
+        This method configures tight subplot parameters and figure margins to
+        reduce the gap between the toolbar and plot area.
+        """
+        # Use tight_layout with minimal padding
+        self.fig.tight_layout(pad=0.1, h_pad=0.1, w_pad=0.1)
+        
+        # Further optimize with manual subplot parameters for minimal margins
+        self.fig.subplots_adjust(
+            left=0.08,    # Minimal left margin for y-axis labels
+            bottom=0.08,  # Minimal bottom margin for x-axis labels
+            right=0.96,   # Minimal right margin
+            top=0.94,     # Minimal top margin below title
+            wspace=0.02,  # Minimal horizontal space between subplots
+            hspace=0.02   # Minimal vertical space between subplots
+        )
+        
     def _setup_empty_plot(self) -> None:
         """Configure the initial empty plot appearance."""
         self.ax.set_xlabel(PLOT_XLABEL)
