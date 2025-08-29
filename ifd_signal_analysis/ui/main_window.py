@@ -330,6 +330,7 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
         self.channel_list.channel_visibility_changed.connect(self._on_channel_visibility_changed)
         self.channel_list.channel_removed.connect(self._on_channel_removed)
         self.channel_list.channel_selected.connect(self._on_channel_selected_from_list)
+        self.channel_list.channel_inverted.connect(self._on_channel_inverted)
         channel_layout.addWidget(self.channel_list)
         
         layout.addWidget(channel_group)
@@ -897,6 +898,88 @@ class IFDSignalAnalysisMainWindow(QMainWindow):
             # Update status
             remaining_channels = self.plot_canvas.get_channel_count()
             self.channel_count_label.setText(f'{remaining_channels} channel(s) loaded')
+    
+    def _on_channel_inverted(self, channel_name: str, inverted: bool) -> None:
+        """Handle channel inversion from the channel list."""
+        try:
+            if self.use_multi_plot:
+                # Update plots in multi-plot mode
+                active_plot_id = self.plot_manager.get_active_plot_id()
+                if active_plot_id:
+                    active_canvas = self.plot_manager.get_plot_canvas(active_plot_id)
+                    if active_canvas:
+                        # Check if this is an original channel or processed channel
+                        found_in_loaded_data = False
+                        for file_key, channels in self.loaded_data.items():
+                            if channel_name in channels:
+                                channel_data = channels[channel_name]
+                                # Update the plot's internal data for this original channel
+                                if channel_name in active_canvas.plot_data:
+                                    active_canvas.plot_data[channel_name]['voltage_data'] = channel_data.voltage_data
+                                    # Update the plot line data
+                                    line = active_canvas.plot_data[channel_name].get('line')
+                                    if line:
+                                        line.set_ydata(channel_data.voltage_data)
+                                found_in_loaded_data = True
+                                break
+                        
+                        if not found_in_loaded_data:
+                            # This is likely a processed channel - the data was already updated in the channel list
+                            # We just need to refresh the plot line if it exists
+                            if channel_name in active_canvas.plot_data:
+                                plot_info = active_canvas.plot_data[channel_name]
+                                line = plot_info.get('line')
+                                if line and 'voltage_data' in plot_info:
+                                    # Use the updated voltage_data from plot_info
+                                    line.set_ydata(plot_info['voltage_data'])
+                        
+                        # Refresh the plot display
+                        active_canvas.draw()
+            else:
+                # Single plot mode - same logic
+                if hasattr(self.plot_canvas, 'plot_data'):
+                    # Check if this is an original channel or processed channel
+                    found_in_loaded_data = False
+                    for file_key, channels in self.loaded_data.items():
+                        if channel_name in channels:
+                            channel_data = channels[channel_name]
+                            # Update the plot's internal data for this original channel
+                            if channel_name in self.plot_canvas.plot_data:
+                                self.plot_canvas.plot_data[channel_name]['voltage_data'] = channel_data.voltage_data
+                                # Update the plot line data
+                                line = self.plot_canvas.plot_data[channel_name].get('line')
+                                if line:
+                                    line.set_ydata(channel_data.voltage_data)
+                            found_in_loaded_data = True
+                            break
+                    
+                    if not found_in_loaded_data:
+                        # This is likely a processed channel - the data was already updated in the channel list
+                        # We just need to refresh the plot line if it exists
+                        if channel_name in self.plot_canvas.plot_data:
+                            plot_info = self.plot_canvas.plot_data[channel_name]
+                            line = plot_info.get('line')
+                            if line and 'voltage_data' in plot_info:
+                                # Use the updated voltage_data from plot_info
+                                line.set_ydata(plot_info['voltage_data'])
+                    
+                    # Refresh the plot display
+                    self.plot_canvas.draw()
+                else:
+                    # Fallback: trigger a full plot refresh
+                    self.plot_canvas.draw()
+            
+            # Update status message
+            status_text = "un-inverted" if not inverted else "inverted"
+            self.status_bar.showMessage(
+                f'Channel {channel_name} {status_text}', 
+                STATUS_MESSAGE_SHORT
+            )
+            
+            # Plot successfully updated
+            
+        except Exception as e:
+            print(f"Error updating plot for inverted channel {channel_name}: {e}")
         
     # ==================== User Actions ====================
     

@@ -6,7 +6,7 @@ This module contains the ChannelListWidget class for managing channel visibility
 and properties in the user interface.
 """
 
-from typing import Optional
+from typing import Optional, Dict
 
 from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QWidget, QHBoxLayout, 
@@ -47,6 +47,7 @@ class ChannelListWidget(QListWidget):
     channel_visibility_changed = pyqtSignal(str, bool)  # channel_name, visible
     channel_removed = pyqtSignal(str)  # channel_name
     channel_selected = pyqtSignal(str)  # channel_name
+    channel_inverted = pyqtSignal(str, bool)  # channel_name, inverted
     
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         """
@@ -61,6 +62,9 @@ class ChannelListWidget(QListWidget):
         
         # Channel selection state
         self.selected_channel: Optional[str] = None
+        
+        # Channel inversion state tracking
+        self.inverted_channels: Dict[str, bool] = {}
         
         # Connect item clicks to selection handler
         self.itemClicked.connect(self._on_item_clicked)
@@ -124,7 +128,11 @@ class ChannelListWidget(QListWidget):
         Returns:
             Formatted string containing channel information
         """
-        info_text = f"{channel_name}"
+        # Add inversion indicator if channel is inverted
+        is_inverted = self.inverted_channels.get(channel_name, False)
+        prefix = "⇅ " if is_inverted else ""
+        
+        info_text = f"{prefix}{channel_name}"
         
         # Add voltage division information if available
         if hasattr(channel_data, 'volt_div_val') and channel_data.volt_div_val:
@@ -140,12 +148,18 @@ class ChannelListWidget(QListWidget):
         if hasattr(channel_data, 'voltage_data') and len(channel_data.voltage_data) > 0:
             sample_count = len(channel_data.voltage_data)
             info_text += f" [{sample_count} samples]"
+        
+        # Add inversion indicator text if channel is inverted
+        if is_inverted:
+            info_text += " (inverted)"
             
         return info_text
         
     def clear_all_channels(self) -> None:
         """Remove all channels from the list."""
         self.clear()
+        # Clear inversion state tracking
+        self.inverted_channels.clear()
         
     def _show_context_menu(self, position: 'QPoint') -> None:
         """
@@ -157,8 +171,20 @@ class ChannelListWidget(QListWidget):
         item = self.itemAt(position)
         if item is not None:
             channel_name = item.data(Qt.ItemDataRole.UserRole)
+            is_inverted = self.inverted_channels.get(channel_name, False)
             
             menu = QMenu(self)
+            
+            # Inversion toggle action
+            invert_text = "Un-invert Channel" if is_inverted else "Invert Channel"
+            invert_action = menu.addAction(invert_text)
+            invert_action.triggered.connect(
+                lambda: self._toggle_channel_inversion(channel_name)
+            )
+            
+            menu.addSeparator()
+            
+            # Remove action
             remove_action = menu.addAction(f"Remove {channel_name}")
             remove_action.triggered.connect(
                 lambda: self._remove_channel_item(channel_name)
@@ -166,6 +192,79 @@ class ChannelListWidget(QListWidget):
             
             menu.exec(self.mapToGlobal(position))
             
+    def _toggle_channel_inversion(self, channel_name: str) -> None:
+        """
+        Toggle the inversion state of a channel and update its voltage data.
+        
+        Args:
+            channel_name: Name of the channel to invert/un-invert
+        """
+        try:
+            # Toggle the inversion state
+            current_state = self.inverted_channels.get(channel_name, False)
+            new_state = not current_state
+            self.inverted_channels[channel_name] = new_state
+            
+            # Get the channel data from parent's loaded_data
+            # We need to access the parent window's data
+            parent_window = self.parent()
+            while parent_window and not hasattr(parent_window, 'loaded_data'):
+                parent_window = parent_window.parent()
+                
+            if parent_window and hasattr(parent_window, 'loaded_data'):
+                # Try to find channel in loaded_data first (original channels)
+                channel_data = None
+                for file_key, channels in parent_window.loaded_data.items():
+                    if channel_name in channels:
+                        channel_data = channels[channel_name]
+                        break
+                
+                if channel_data is not None:
+                    # Found in loaded_data - invert the original channel data
+                    channel_data.voltage_data *= -1
+                    print(f"Inverted original channel {channel_name}")
+                else:
+                    # Not found in loaded_data - might be a processed channel
+                    # Try to find it in the active plot canvas
+                    if hasattr(parent_window, 'plot_canvas') and parent_window.plot_canvas:
+                        canvas = parent_window.plot_canvas
+                        if hasattr(canvas, 'plot_data') and channel_name in canvas.plot_data:
+                            plot_info = canvas.plot_data[channel_name]
+                            if 'voltage_data' in plot_info:
+                                # Invert the plot data directly
+                                plot_info['voltage_data'] *= -1
+                                print(f"Inverted processed channel {channel_name} in plot data")
+                            elif hasattr(plot_info.get('line'), 'get_ydata'):
+                                # Get data from matplotlib line, invert it, and update
+                                line = plot_info['line']
+                                ydata = line.get_ydata()
+                                inverted_data = ydata * -1
+                                line.set_ydata(inverted_data)
+                                # Also update the stored plot data if available
+                                if 'voltage_data' in plot_info:
+                                    plot_info['voltage_data'] = inverted_data
+                                print(f"Inverted processed channel {channel_name} via matplotlib line")
+                            else:
+                                print(f"Warning: Could not find voltage data for processed channel {channel_name}")
+                                return
+                        else:
+                            print(f"Warning: Could not find channel {channel_name} in plot data")
+                            return
+                    else:
+                        print(f"Warning: Could not find plot canvas for processed channel {channel_name}")
+                        return
+                
+                # Update visual indicator
+                self._update_channel_visual(channel_name)
+                
+                # Emit signal to notify parent components
+                self.channel_inverted.emit(channel_name, new_state)
+            else:
+                print("Warning: Could not find parent window with loaded_data")
+                
+        except Exception as e:
+            print(f"Error in _toggle_channel_inversion for {channel_name}: {e}")
+    
     def _remove_channel_item(self, channel_name: str) -> None:
         """
         Remove a specific channel from the list.
@@ -177,6 +276,9 @@ class ChannelListWidget(QListWidget):
             item = self.item(i)
             if item and item.data(Qt.ItemDataRole.UserRole) == channel_name:
                 self.takeItem(i)
+                # Clean up inversion state
+                if channel_name in self.inverted_channels:
+                    del self.inverted_channels[channel_name]
                 self.channel_removed.emit(channel_name)
                 break
                 
@@ -343,3 +445,39 @@ class ChannelListWidget(QListWidget):
             if item and item.data(Qt.ItemDataRole.UserRole) == channel_name:
                 return item
         return None
+    
+    def _update_channel_visual(self, channel_name: str) -> None:
+        """
+        Update the visual appearance of a channel to reflect its current state.
+        
+        Args:
+            channel_name: Name of the channel to update
+        """
+        item = self._find_item_by_channel(channel_name)
+        if item:
+            widget = self.itemWidget(item)
+            if widget:
+                label = widget.findChild(QLabel)
+                if label:
+                    # Get the channel data to regenerate the label text
+                    parent_window = self.parent()
+                    while parent_window and not hasattr(parent_window, 'loaded_data'):
+                        parent_window = parent_window.parent()
+                        
+                    if parent_window and hasattr(parent_window, 'loaded_data'):
+                        # Search through all files for the channel data
+                        channel_data = None
+                        for file_key, channels in parent_window.loaded_data.items():
+                            if channel_name in channels:
+                                channel_data = channels[channel_name]
+                                break
+                        
+                        if channel_data is not None:
+                            new_text = self._format_channel_info(channel_name, channel_data)
+                            label.setText(new_text)
+                            
+                            # Apply italic font style to inverted channels
+                            is_inverted = self.inverted_channels.get(channel_name, False)
+                            font = label.font()
+                            font.setItalic(is_inverted)
+                            label.setFont(font)
